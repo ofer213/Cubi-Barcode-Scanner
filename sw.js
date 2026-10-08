@@ -1,5 +1,5 @@
 /* Cubey Scanner service worker: works offline after the first visit. */
-const CACHE = 'cubey-scanner-v1.1.0';
+const CACHE = 'cubey-scanner-v1.1.1';
 const FILES = [
   './',
   'index.html',
@@ -18,7 +18,10 @@ const FILES = [
 ];
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(FILES)).then(() => self.skipWaiting()));
+  // cache: 'reload' – always take the files from the server, never from the browser's HTTP cache
+  event.waitUntil(caches.open(CACHE)
+    .then((cache) => cache.addAll(FILES.map((f) => new Request(f, { cache: 'reload' }))))
+    .then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (event) => {
@@ -33,8 +36,10 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
+  // no-cache: ask the server every time (GitHub Pages lets browsers keep files for 10 minutes,
+  // which could mix old and new files right after an update)
   event.respondWith(
-    fetch(req)
+    fetch(req.url, { cache: 'no-cache' })
       .then((res) => {
         if (res && res.ok) {
           const copy = res.clone();
