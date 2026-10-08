@@ -1,10 +1,12 @@
 /* Cubey Scanner service worker: works offline after the first visit. */
-const CACHE = 'cubey-scanner-v1.0.0';
+const CACHE = 'cubey-scanner-v1.1.0';
 const FILES = [
   './',
   'index.html',
   'style.css',
   'app.js',
+  'remote.js',
+  'vendor/mqtt.min.js',
   'manifest.webmanifest',
   'vendor/zxing-reader.js',
   'vendor/zxing_reader.wasm',

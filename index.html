@@ -31,6 +31,7 @@
       <button type="button" role="tab" data-target="pc" id="tabPc">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1h-6v2h3v2H7v-2h3v-2H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm1 2v8h14V7H5z"/></svg>
         <span>מחשב</span>
+        <i class="tab-dot" id="pcDot" aria-hidden="true"></i>
       </button>
       <button type="button" role="tab" data-target="phone" id="tabPhone">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M8 2h8a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm0 2v16h8V4H8zm3 13h2v2h-2v-2z"/></svg>
@@ -75,11 +76,29 @@
     </div>
 
     <section class="panel" id="panelPc" hidden>
-      <div class="panel-head"><h2>שליחה למחשב</h2></div>
-      <div class="notice">
-        <strong>החיבור למחשב יופעל בעדכון הבא של Cubey Scanner.</strong>
-        <p>אחרי העדכון: בוחרים עמדה, סורקים את קוד ה-QR שמוצג על מסך המחשב פעם אחת, וכל סריקה תוקלד במחשב בשדה שבו נמצא הסמן.</p>
-        <p class="muted small">בינתיים הסריקות במצב הזה נשמרות ב"סריקות אחרונות" כדי שלא ילכו לאיבוד.</p>
+      <div class="panel-head">
+        <h2>שליחה למחשב</h2>
+        <button type="button" class="link" id="btnPair">+ חבר עמדה</button>
+      </div>
+      <div id="stationBox" hidden>
+        <label class="station-field">
+          <span class="muted small">עמדה</span>
+          <select id="stationSelect" aria-label="בחר עמדה"></select>
+        </label>
+        <div class="conn" id="connStatus"><span class="dot" aria-hidden="true"></span><span id="connText"></span></div>
+        <div class="pending-row">
+          <p class="muted small" id="pendingInfo" hidden></p>
+          <button type="button" class="link danger small" id="btnClearPending" hidden>מחק ממתינות</button>
+        </div>
+        <button type="button" class="link danger small" id="btnRemoveStation">הסר עמדה זו מהטלפון</button>
+      </div>
+      <div class="notice" id="pairHelp">
+        <strong>חיבור עמדה – פעם אחת בלבד</strong>
+        <ol class="steps">
+          <li>במחשב: לחיצה ימנית על האייקון של Cubey Scanner ליד השעון ← <b>טלפונים</b> ← <b>חבר טלפון (קוד QR)</b>.</li>
+          <li>כאן: לחץ על הכפתור למטה וסרוק את קוד ה-QR שמופיע במחשב.</li>
+        </ol>
+        <button type="button" class="primary small-btn" id="btnPairHelp">חבר עמדה</button>
       </div>
     </section>
 
@@ -88,7 +107,7 @@
         <h2>סריקות אחרונות</h2>
         <button type="button" class="link" id="btnClearHistory">נקה</button>
       </div>
-      <p class="muted small">כל סריקה מועתקת ללוח. אם הדפדפן לא מאפשר העתקה אוטומטית, הקש על "העתק".</p>
+      <p class="muted small" id="copyHint">כל סריקה מועתקת ללוח. אם הדפדפן לא מאפשר העתקה אוטומטית, הקש על "העתק".</p>
       <ul class="history" id="history"></ul>
       <p class="empty" id="historyEmpty">עדיין לא נסרק כלום.</p>
     </section>
@@ -143,6 +162,8 @@
 
   <script src="vendor/zxing-reader.js"></script>
   <script src="vendor/xlsx.mini.min.js"></script>
+  <script src="vendor/mqtt.min.js"></script>
+  <script src="remote.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

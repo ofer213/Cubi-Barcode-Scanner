@@ -1,11 +1,11 @@
 /* Cubey Scanner – phone app
  * Scans QR codes and barcodes with the phone camera.
- * Targets: PC (enabled by the next Cubey Scanner update), phone (copy to clipboard), list (Excel export).
+ * Targets: PC (typed on a paired Cubey Scanner station), phone (copy to clipboard), list (Excel export).
  */
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.0.0';
+  const APP_VERSION = '1.1.0';
   const STORE = { settings: 'cubey.settings.v1', list: 'cubey.list.v1', history: 'cubey.history.v1' };
   const DEFAULTS = { target: 'phone', mode: 'continuous', beep: true, vibrate: true, wake: true, repeat: 1.5, sumQty: false };
   const HISTORY_MAX = 50;
@@ -40,6 +40,8 @@
   if (!Array.isArray(list)) list = [];
   if (!Array.isArray(history)) history = [];
   const saveSettings = () => save(STORE.settings, settings);
+  const remote = new window.CubeyRemote.Remote();
+  let pairMode = false;
   const saveList = () => save(STORE.list, list);
   const saveHistory = () => save(STORE.history, history);
 
@@ -411,6 +413,26 @@
     vibrate();
     flash();
 
+    // A station QR code pairs this phone, in any mode
+    if (code.includes('#pair=')) {
+      const station = remote.pair(code);
+      if (station) {
+        toast(`העמדה "${station.name}" חוברה ✓`, 2600);
+        setTarget('pc');
+        if (pairMode) {
+          pairMode = false;
+          scanner.stop();
+        }
+      } else {
+        toast('קוד QR של עמדה לא תקין');
+      }
+      return;
+    }
+    if (pairMode) {
+      toast('זה לא קוד חיבור. סרוק את קוד ה-QR שמוצג במחשב.');
+      return;
+    }
+
     if (settings.target === 'list') {
       list.push({ id: uid(), code, format, ts: Date.now() });
       saveList();
@@ -426,8 +448,19 @@
     saveHistory();
 
     if (settings.target === 'pc') {
+      const station = remote.active;
+      if (!station) {
+        renderHistory();
+        toast('קודם חבר עמדה: לחץ "חבר עמדה" וסרוק את הקוד שבמחשב', 3000);
+        return;
+      }
+      entry.target = 'pc';
+      entry.station = station.name;
+      entry.state = 'sending';
+      entry.msgId = remote.send(code, format);
+      saveHistory();
       renderHistory();
-      toast('החיבור למחשב יופעל בעדכון הבא · הסריקה נשמרה');
+      toast(`נשלח למחשב · ${code}`);
       return;
     }
 
@@ -441,6 +474,13 @@
   }
 
   // ---------------------------------------------------------------- rendering
+  const ACK_TEXT = { type: 'הוקלד במחשב ✓', list: 'נוסף לרשימה במחשב ✓', both: 'הוקלד ונוסף לרשימה במחשב ✓' };
+  function pcStateText(item) {
+    const where = item.station ? `${item.station}: ` : '';
+    if (item.state === 'sending') return `${where}ממתין לאישור מהמחשב…`;
+    return where + (ACK_TEXT[item.state] || 'התקבל במחשב ✓');
+  }
+
   function renderHistory() {
     const ul = $('history');
     ul.textContent = '';
@@ -462,6 +502,7 @@
         el('div', {}, [
           el('div', { class: 'code', text: item.code }),
           el('div', { class: 'meta', text: `${formatName(item.format)} · ${formatTime(item.ts)}` }),
+          item.target === 'pc' ? el('div', { class: 'meta pc-state ' + (item.state || ''), text: pcStateText(item) }) : null,
         ]),
         el('div', { class: 'actions' }, [copyBtn]),
       ]));
@@ -542,6 +583,52 @@
     list = list.filter((x) => x.id !== id);
     saveList();
     renderList();
+  }
+
+  // ---------------------------------------------------------------- PC stations
+  const CONN = {
+    none: ['', ''],
+    connecting: ['warn', 'מתחבר…'],
+    'no-internet': ['bad', 'אין חיבור לאינטרנט – הסריקות יישלחו כשהחיבור יחזור'],
+    'pc-offline': ['bad', 'המחשב לא זמין – התוכנה סגורה או שהמחשב כבוי. הסריקות יישלחו כשיחזור.'],
+    relay: ['ok', 'מחובר · דרך האינטרנט'],
+    direct: ['ok', 'מחובר · חיבור ישיר'],
+    'direct-local': ['ok', 'מחובר · Wi-Fi ישיר'],
+  };
+
+  function renderStations() {
+    const select = $('stationSelect');
+    select.textContent = '';
+    for (const st of remote.stations) {
+      const opt = el('option', { value: st.id, text: st.name });
+      if (st.id === remote.activeId) opt.selected = true;
+      select.appendChild(opt);
+    }
+    const has = remote.stations.length > 0;
+    $('stationBox').hidden = !has;
+    $('pairHelp').hidden = has;
+    renderConnection();
+  }
+
+  function renderConnection() {
+    const [cls, text] = CONN[remote.state] || CONN.connecting;
+    const box = $('connStatus');
+    box.className = 'conn ' + cls;
+    $('connText').textContent = text;
+    const n = remote.pendingCount();
+    $('pendingInfo').hidden = n === 0;
+    $('pendingInfo').textContent = n ? `${n} סריקות ממתינות לשליחה` : '';
+    $('btnClearPending').hidden = n === 0;
+    const tabDot = $('pcDot');
+    tabDot.className = 'tab-dot ' + (remote.active ? cls : '');
+  }
+
+  function startPairing() {
+    setTarget('pc');
+    pairMode = true;
+    setIdle('סרוק את קוד ה-QR שמוצג במסך המחשב');
+    toast('כוון את המצלמה לקוד ה-QR שבמחשב');
+    if (!scanner.running) scanner.start();
   }
 
   // ---------------------------------------------------------------- Excel
@@ -627,7 +714,7 @@
   }
 
   const IDLE_TEXT = {
-    pc: 'אחרי עדכון Cubey Scanner במחשב, הסריקה תוקלד בשדה שבו נמצא הסמן.',
+    pc: 'הסריקה תוקלד במחשב, בשדה שבו נמצא הסמן.',
     phone: 'הסריקה תועתק ללוח ותופיע ברשימה למטה.',
     list: 'כל סריקה תתווסף לרשימה, ואפשר לשמור אותה כקובץ אקסל.',
   };
@@ -639,6 +726,8 @@
       btn.setAttribute('aria-selected', String(btn.dataset.target === target));
     }
     $('panelPc').hidden = target !== 'pc';
+    $('copyHint').hidden = target === 'pc';
+    remote.setEnabled(target === 'pc');
     $('panelPhone').hidden = target === 'list';
     $('panelList').hidden = target !== 'list';
     if (!scanner.running) setIdle(IDLE_TEXT[target]);
@@ -660,8 +749,12 @@
     $('modeContinuous').addEventListener('click', () => setMode('continuous'));
 
     $('btnScan').addEventListener('click', () => {
-      if (scanner.running) scanner.stop();
-      else scanner.start();
+      if (scanner.running) {
+        pairMode = false;
+        scanner.stop();
+      } else {
+        scanner.start();
+      }
     });
     $('btnTorch').addEventListener('click', () => scanner.toggleTorch());
     $('zoom').addEventListener('input', (e) => scanner.setZoom(e.target.value));
@@ -686,6 +779,27 @@
       renderHistory();
     });
     $('btnExport').addEventListener('click', exportExcel);
+
+    $('btnPair').addEventListener('click', startPairing);
+    $('btnPairHelp').addEventListener('click', startPairing);
+    $('stationSelect').addEventListener('change', (e) => remote.setActive(e.target.value));
+    $('btnRemoveStation').addEventListener('click', () => {
+      const st = remote.active;
+      if (st && window.confirm(`להסיר את העמדה "${st.name}" מהטלפון?`)) remote.remove(st.id);
+    });
+    $('btnClearPending').addEventListener('click', () => {
+      if (window.confirm('למחוק את הסריקות שעוד לא נשלחו למחשב?')) remote.clearPending();
+    });
+    remote.addEventListener('stations', renderStations);
+    remote.addEventListener('status', renderConnection);
+    remote.addEventListener('ack', (e) => {
+      const item = history.find((h) => h.msgId === e.detail.id);
+      if (item) {
+        item.state = e.detail.result;
+        saveHistory();
+        renderHistory();
+      }
+    });
     $('btnShare').hidden = !canShareFiles();
     $('btnShare').addEventListener('click', shareExcel);
 
@@ -717,6 +831,15 @@
     setTarget(['pc', 'phone', 'list'].includes(settings.target) ? settings.target : 'phone');
     renderHistory();
     renderList();
+    renderStations();
+    if (location.hash.includes('#pair=')) {
+      const station = remote.pair(location.hash);
+      try { window.history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* ignore */ }
+      if (station) {
+        setTarget('pc');
+        toast(`העמדה "${station.name}" חוברה ✓`, 3000);
+      }
+    }
     prepareDecoder().catch(() => { /* retried on start */ });
 
     const local = ['localhost', '127.0.0.1'].includes(location.hostname);
@@ -726,7 +849,7 @@
   }
 
   // test hook (used by automated tests only)
-  window.__cubey = { scanner, onScan, buildWorkbook, get list() { return list; }, get history() { return history; }, settings };
+  window.__cubey = { scanner, onScan, buildWorkbook, remote, get list() { return list; }, get history() { return history; }, settings };
 
   init();
 })();
