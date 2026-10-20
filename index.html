@@ -13,7 +13,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-  <link rel="stylesheet" href="style.css?v=1.1.1">
+  <link rel="stylesheet" href="style.css?v=1.2.0">
 </head>
 <body>
   <div class="app">
@@ -22,6 +22,10 @@
         <img src="icons/icon-192.png" alt="" width="28" height="28">
         <span>Cubey Scanner</span>
       </div>
+      <button class="install-btn" id="btnInstall" type="button" hidden>
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M12 3v10.6l3.3-3.3 1.4 1.4-5.7 5.7-5.7-5.7 1.4-1.4 3.3 3.3V3h2zM5 19h14v2H5v-2z"/></svg>
+        התקן אייקון
+      </button>
       <button class="icon-btn" id="btnSettings" type="button" aria-label="הגדרות">
         <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M19.14 12.94a7.07 7.07 0 0 0 .06-.94 7.07 7.07 0 0 0-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.03 7.03 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 2h-3.84a.5.5 0 0 0-.49.42l-.36 2.54c-.59.24-1.13.56-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.67 8.48a.5.5 0 0 0 .12.64l2.03 1.58a7.07 7.07 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.3.6.22l2.39-.96c.5.38 1.04.7 1.63.94l.36 2.54c.04.24.25.42.49.42h3.84c.24 0 .45-.18.49-.42l.36-2.54c.59-.24 1.13-.56 1.63-.94l2.39.96c.22.08.47 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg>
       </button>
@@ -160,10 +164,34 @@
     </form>
   </dialog>
 
-  <script src="vendor/zxing-reader.js?v=1.1.1"></script>
-  <script src="vendor/xlsx.mini.min.js?v=1.1.1"></script>
-  <script src="vendor/mqtt.min.js?v=1.1.1"></script>
-  <script src="remote.js?v=1.1.1"></script>
-  <script src="app.js?v=1.1.1"></script>
+  <dialog class="sheet" id="installDialog">
+    <form method="dialog">
+      <h2>אייקון במסך הבית</h2>
+      <div id="installIos">
+        <p><b>אייפון / אייפד (Safari):</b></p>
+        <ol>
+          <li>הקש על כפתור השיתוף <b>⬆︎</b> בתחתית המסך.</li>
+          <li>גלול ובחר <b>הוסף למסך הבית</b>.</li>
+          <li>הקש <b>הוסף</b>. האייקון Cubey Scanner יופיע במסך הבית.</li>
+        </ol>
+        <p class="muted small">בדפדפנים אחרים באייפון האפשרות לא קיימת – פתח את הקישור ב-Safari.</p>
+      </div>
+      <div id="installAndroid">
+        <p><b>אנדרואיד (Chrome / Brave / Samsung Internet):</b></p>
+        <ol>
+          <li>הקש על התפריט <b>⋮</b> (או ☰).</li>
+          <li>בחר <b>התקן אפליקציה</b> או <b>הוסף למסך הבית</b>.</li>
+          <li>אשר. האייקון Cubey Scanner יופיע במסך הבית.</li>
+        </ol>
+      </div>
+      <div class="sheet-actions"><button class="primary" value="close">סגור</button></div>
+    </form>
+  </dialog>
+
+  <script src="vendor/zxing-reader.js?v=1.2.0"></script>
+  <script src="vendor/xlsx.mini.min.js?v=1.2.0"></script>
+  <script src="vendor/mqtt.min.js?v=1.2.0"></script>
+  <script src="remote.js?v=1.2.0"></script>
+  <script src="app.js?v=1.2.0"></script>
 </body>
 </html>

@@ -5,7 +5,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.1.1';
+  const APP_VERSION = '1.2.0';
   const STORE = { settings: 'cubey.settings.v1', list: 'cubey.list.v1', history: 'cubey.history.v1' };
   const DEFAULTS = { target: 'phone', mode: 'continuous', beep: true, vibrate: true, wake: true, repeat: 1.5, sumQty: false };
   const HISTORY_MAX = 50;
@@ -17,7 +17,43 @@
     tryDownscale: true,
     maxNumberOfSymbols: 4,
     returnErrors: true,        // damaged codes are reported (never typed)
+    tryCode39ExtendedMode: true,
+    eanAddOnSymbol: 'Read',    // EAN/UPC with 2/5-digit add-on (magazines, books)
   };
+  // For dense/long barcodes: no internal downscaling, denoise, extra scan lines
+  const READ_DENSE = Object.assign({}, READ_OPTS, { tryDownscale: false, tryDenoise: true });
+
+  // ---------------------------------------------------------------- native detector (Android)
+  const NATIVE_NAMES = {
+    aztec: 'Aztec', code_128: 'Code128', code_39: 'Code39', code_93: 'Code93', codabar: 'Codabar',
+    data_matrix: 'DataMatrix', ean_13: 'EAN13', ean_8: 'EAN8', itf: 'ITF', pdf417: 'PDF417',
+    qr_code: 'QRCode', upc_a: 'UPCA', upc_e: 'UPCE',
+  };
+  let nativeDetector;          // undefined = not checked yet, null = not available
+  async function getNativeDetector() {
+    if (nativeDetector !== undefined) return nativeDetector;
+    nativeDetector = null;
+    try {
+      if ('BarcodeDetector' in window) {
+        const supported = await window.BarcodeDetector.getSupportedFormats();
+        const formats = supported.filter((f) => NATIVE_NAMES[f]);
+        if (formats.length) nativeDetector = new window.BarcodeDetector({ formats });
+      }
+    } catch (e) { nativeDetector = null; }
+    return nativeDetector;
+  }
+  async function nativeDetect(source) {
+    const det = await getNativeDetector();
+    if (!det) return [];
+    try {
+      const found = await det.detect(source);
+      return found
+        .filter((b) => b.rawValue)
+        .map((b) => ({ text: b.rawValue, format: NATIVE_NAMES[b.format] || b.format, isValid: true }));
+    } catch (e) {
+      return [];
+    }
+  }
 
   const $ = (id) => document.getElementById(id);
 
@@ -212,7 +248,8 @@
       try {
         stream = await navigator.mediaDevices.getUserMedia({
           audio: false,
-          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+          // as sharp as the camera allows (4K when available) – thin bars of long serial-number barcodes need it
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 } },
         });
       } catch (e) {
         if (e && (e.name === 'OverconstrainedError' || e.name === 'NotFoundError')) {
@@ -340,13 +377,13 @@
       this.timer = setTimeout(() => this.tick(), 60);
     },
 
-    async read(sx, sy, sw, sh, dw, dh) {
+    async read(sx, sy, sw, sh, dw, dh, opts = READ_OPTS) {
       const canvas = this.canvas;
       if (canvas.width !== dw) canvas.width = dw;
       if (canvas.height !== dh) canvas.height = dh;
       this.ctx.drawImage($('video'), sx, sy, sw, sh, 0, 0, dw, dh);
       const image = this.ctx.getImageData(0, 0, dw, dh);
-      return ZXingWASM.readBarcodes(image, READ_OPTS);
+      return ZXingWASM.readBarcodes(image, opts);
     },
 
     async decodeFrame(video) {
@@ -354,27 +391,49 @@
       const vh = video.videoHeight;
       this.frameNo += 1;
       let invalid = false;
+      const take = (results) => {
+        const valid = results.filter((r) => r.isValid && r.text);
+        if (!valid.length) invalid = invalid || results.some((r) => !r.isValid && r.text);
+        return valid;
+      };
+
+      // Pass 0: the phone's built-in barcode engine (Chrome/Brave on Android) – fast and good with dense codes
+      const native = await nativeDetect(video);
+      if (native.length) return { valid: native, invalid: false };
 
       // Pass 1: whole picture (scaled to 1280 on the long side for speed)
       const scale = Math.min(1, 1280 / Math.max(vw, vh));
-      let results = await this.read(0, 0, vw, vh, Math.round(vw * scale), Math.round(vh * scale));
-      let valid = results.filter((r) => r.isValid && r.text);
+      let valid = take(await this.read(0, 0, vw, vh, Math.round(vw * scale), Math.round(vh * scale)));
       if (valid.length) return { valid, invalid: false };
-      invalid = results.some((r) => !r.isValid && r.text);
 
-      // Pass 2 (every 2nd frame): center of the picture at full resolution – small barcodes
-      if (this.frameNo % 2 === 0) {
+      // Extra passes take turns, one per frame, so the camera stays smooth
+      const turn = this.frameNo % 3;
+      if (turn === 0) {
+        // Center of the picture, enlarged – small barcodes
         const cw = Math.round(vw * 0.6);
         const ch = Math.round(vh * 0.6);
-        const sx = Math.round((vw - cw) / 2);
-        const sy = Math.round((vh - ch) / 2);
-        const factor = Math.max(1, Math.min(2, 900 / Math.max(cw, ch)));
-        results = await this.read(sx, sy, cw, ch, Math.round(cw * factor), Math.round(ch * factor));
-        valid = results.filter((r) => r.isValid && r.text);
-        if (valid.length) return { valid, invalid: false };
-        invalid = invalid || results.some((r) => !r.isValid && r.text);
+        const factor = Math.max(1, Math.min(2, 1100 / Math.max(cw, ch)));
+        valid = take(await this.read(Math.round((vw - cw) / 2), Math.round((vh - ch) / 2), cw, ch,
+          Math.round(cw * factor), Math.round(ch * factor)));
+      } else if (turn === 1) {
+        // Center of the picture at full camera resolution – long, dense barcodes (serial-number labels)
+        const cw = Math.round(vw * 0.7);
+        const ch = Math.round(vh * 0.7);
+        valid = take(await this.read(Math.round((vw - cw) / 2), Math.round((vh - ch) / 2), cw, ch, cw, ch, READ_DENSE));
+      } else {
+        // Wide band through the center (barcode lying down), then a tall band (barcode standing up),
+        // at full resolution – enlarged when the camera picture is small
+        const bands = [[0.85, 0.4], [0.4, 0.85]];
+        for (const [fw, fh] of bands) {
+          const cw = Math.round(vw * fw);
+          const ch = Math.round(vh * fh);
+          const factor = Math.max(1, Math.min(2, 1600 / Math.max(cw, ch)));
+          valid = take(await this.read(Math.round((vw - cw) / 2), Math.round((vh - ch) / 2), cw, ch,
+            Math.round(cw * factor), Math.round(ch * factor), READ_DENSE));
+          if (valid.length) break;
+        }
       }
-      return { valid: [], invalid };
+      return { valid, invalid };
     },
 
     handleResult({ valid, invalid }) {
@@ -827,6 +886,7 @@
   function init() {
     $('appVersion').textContent = APP_VERSION;
     bind();
+    setupInstall();
     setMode(settings.mode === 'single' ? 'single' : 'continuous');
     setTarget(['pc', 'phone', 'list'].includes(settings.target) ? settings.target : 'phone');
     renderHistory();
@@ -846,6 +906,41 @@
     if ('serviceWorker' in navigator && (location.protocol === 'https:' || local)) {
       navigator.serviceWorker.register('sw.js').catch(() => {});
     }
+  }
+
+  // ---------------------------------------------------------------- home-screen icon
+  let installEvent = null;
+  function isInstalled() {
+    return (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
+  }
+  function setupInstall() {
+    const btn = $('btnInstall');
+    const ios = /iphone|ipad|ipod/i.test(navigator.userAgent) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    const mobile = ios || /android/i.test(navigator.userAgent);
+    btn.hidden = isInstalled() || !mobile;
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      installEvent = e;
+      btn.hidden = isInstalled();
+    });
+    window.addEventListener('appinstalled', () => {
+      installEvent = null;
+      btn.hidden = true;
+      toast('האייקון נוסף למסך הבית ✓', 2600);
+    });
+    btn.addEventListener('click', async () => {
+      if (installEvent) {
+        installEvent.prompt();
+        try { await installEvent.userChoice; } catch (e) { /* ignore */ }
+        installEvent = null;
+        return;
+      }
+      $('installIos').hidden = !ios;
+      $('installAndroid').hidden = ios;
+      const d = $('installDialog');
+      if (typeof d.showModal === 'function') d.showModal(); else d.setAttribute('open', '');
+    });
   }
 
   // test hook (used by automated tests only)
