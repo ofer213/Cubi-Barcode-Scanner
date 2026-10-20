@@ -217,3 +217,5 @@ button { cursor: pointer; }
 }
 .install-btn[hidden] { display: none; }
 #installDialog ol { padding-inline-start: 22px; line-height: 1.7; margin: 6px 0 10px; }
+.photo-btn { grid-column: 1 / -1; height: 46px; }
+.photo-btn:disabled { opacity: .6; }

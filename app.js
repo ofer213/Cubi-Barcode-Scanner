@@ -816,6 +816,12 @@
       }
     });
     $('btnTorch').addEventListener('click', () => scanner.toggleTorch());
+    $('btnPhoto').addEventListener('click', () => { ensureAudio(); $('photoInput').click(); });
+    $('photoInput').addEventListener('change', (e) => {
+      const files = [...e.target.files];
+      e.target.value = '';
+      scanPhotos(files);
+    });
     $('zoom').addEventListener('input', (e) => scanner.setZoom(e.target.value));
 
     $('sumQty').checked = !!settings.sumQty;
@@ -908,6 +914,95 @@
     }
   }
 
+  // ---------------------------------------------------------------- scan from a photo
+  async function loadPhoto(file) {
+    if (window.createImageBitmap) {
+      try { return await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch (e) { /* fall back */ }
+    }
+    const url = URL.createObjectURL(file);
+    try {
+      const img = new Image();
+      img.src = url;
+      await img.decode();
+      return img;
+    } finally {
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  }
+
+  // Reads every barcode in one photo: phone engine first, then zxing at several sizes
+  async function decodePhoto(file) {
+    const img = await loadPhoto(file);
+    const W = img.width || img.naturalWidth;
+    const H = img.height || img.naturalHeight;
+    const found = new Map();
+    const add = (list) => {
+      for (const r of list) {
+        const text = cleanText(r.text);
+        if (r.isValid && text && !found.has(text)) found.set(text, r.format);
+      }
+    };
+    let invalid = false;
+
+    add(await nativeDetect(img));
+
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    // full size (up to 4000 px) first – thin bars stay sharp; then smaller – big/blurry codes
+    const sizes = [4000, 2000, 1200].filter((s, i) => i === 0 || s < Math.max(W, H));
+    for (const size of sizes) {
+      const scale = Math.min(1, size / Math.max(W, H));
+      canvas.width = Math.round(W * scale);
+      canvas.height = Math.round(H * scale);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      const results = await ZXingWASM.readBarcodes(ctx.getImageData(0, 0, canvas.width, canvas.height), READ_DENSE);
+      add(results);
+      invalid = invalid || results.some((r) => !r.isValid && r.text);
+      if (found.size) break;
+    }
+    if (img.close) img.close();
+    return { codes: [...found].map(([text, format]) => ({ text, format })), invalid };
+  }
+
+  async function scanPhotos(files) {
+    if (!files || !files.length) return;
+    ensureAudio();
+    const btn = $('btnPhoto');
+    btn.disabled = true;
+    $('btnPhotoText').textContent = 'קורא את התמונה…';
+    if (scanner.running) scanner.stop();
+    let total = 0;
+    let damaged = false;
+    try {
+      await prepareDecoder();
+      for (const file of files) {
+        try {
+          const { codes, invalid } = await decodePhoto(file);
+          damaged = damaged || (invalid && !codes.length);
+          for (const c of codes) {
+            onScan(c.text, c.format);
+            total += 1;
+            if (codes.length > 1) await new Promise((r) => setTimeout(r, 350));
+          }
+        } catch (e) {
+          console.error(e);
+        }
+      }
+      if (!total) {
+        toast(damaged ? 'נמצא ברקוד בתמונה, אבל הוא פגום ולא ניתן לקרוא אותו'
+          : 'לא נמצא ברקוד בתמונה. צלם קרוב יותר, ישר וחד.', 3500);
+      } else if (total > 1) {
+        setTimeout(() => toast(`נקראו ${total} קודים מהתמונה`), 1900);
+      }
+    } catch (e) {
+      console.error(e);
+      toast('טעינת מנוע הסריקה נכשלה. בדוק חיבור לאינטרנט ונסה שוב.');
+    } finally {
+      btn.disabled = false;
+      $('btnPhotoText').textContent = 'סרוק מתמונה';
+    }
+  }
+
   // ---------------------------------------------------------------- home-screen icon
   let installEvent = null;
   function isInstalled() {
@@ -944,7 +1039,7 @@
   }
 
   // test hook (used by automated tests only)
-  window.__cubey = { scanner, onScan, buildWorkbook, remote, get list() { return list; }, get history() { return history; }, settings };
+  window.__cubey = { scanner, onScan, scanPhotos, buildWorkbook, remote, get list() { return list; }, get history() { return history; }, settings };
 
   init();
 })();
