@@ -5,7 +5,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.2.0';
+  const APP_VERSION = '1.2.2';
   const STORE = { settings: 'cubey.settings.v1', list: 'cubey.list.v1', history: 'cubey.history.v1' };
   const DEFAULTS = { target: 'phone', mode: 'continuous', beep: true, vibrate: true, wake: true, repeat: 1.5, sumQty: false };
   const HISTORY_MAX = 50;
@@ -22,6 +22,65 @@
   };
   // For dense/long barcodes: no internal downscaling, denoise, extra scan lines
   const READ_DENSE = Object.assign({}, READ_OPTS, { tryDownscale: false, tryDenoise: true });
+
+  // Light bars on a dark background (laser-etched serials on consoles, e.g. PS5): turn the picture
+  // into dark-on-light. zxing's own tryInvert does not cover 1D barcodes, so it is done here.
+  function invertImage(image) {
+    const d = image.data;
+    for (let i = 0; i < d.length; i += 4) {
+      d[i] = 255 - d[i];
+      d[i + 1] = 255 - d[i + 1];
+      d[i + 2] = 255 - d[i + 2];
+    }
+    return image;
+  }
+
+  // Local contrast stretch: every area of the picture is spread to full black-to-white, so faint
+  // bars (etched plastic, glare, shadow) become clear. Works on blocks with smooth blending.
+  function stretchContrast(image, block = 64) {
+    const { width: W, height: H, data: d } = image;
+    const bx = Math.max(1, Math.ceil(W / block));
+    const by = Math.max(1, Math.ceil(H / block));
+    const lo = new Float32Array(bx * by);
+    const hi = new Float32Array(bx * by);
+    const hist = new Uint32Array(256);
+    for (let j = 0; j < by; j += 1) {
+      for (let i = 0; i < bx; i += 1) {
+        hist.fill(0);
+        const x0 = i * block, y0 = j * block;
+        const x1 = Math.min(W, x0 + block), y1 = Math.min(H, y0 + block);
+        let n = 0;
+        for (let y = y0; y < y1; y += 2) {
+          for (let x = x0; x < x1; x += 2) { hist[d[(y * W + x) * 4 + 1]] += 1; n += 1; }
+        }
+        let acc = 0, l = 0, h = 255;
+        const nl = n * 0.02, nh = n * 0.98;
+        for (let v = 0; v < 256; v += 1) {
+          acc += hist[v];
+          if (acc <= nl) l = v;
+          if (acc < nh) h = v + 1;
+        }
+        lo[j * bx + i] = l;
+        hi[j * bx + i] = Math.max(h, l + 1);
+      }
+    }
+    for (let y = 0; y < H; y += 1) {
+      const fy = Math.min(by - 1, Math.max(0, (y + 0.5) / block - 0.5));
+      const j0 = Math.floor(fy), j1 = Math.min(by - 1, j0 + 1), ty = fy - j0;
+      for (let x = 0; x < W; x += 1) {
+        const fx = Math.min(bx - 1, Math.max(0, (x + 0.5) / block - 0.5));
+        const i0 = Math.floor(fx), i1 = Math.min(bx - 1, i0 + 1), tx = fx - i0;
+        const a = j0 * bx, b = j1 * bx;
+        const l = (lo[a + i0] * (1 - tx) + lo[a + i1] * tx) * (1 - ty) + (lo[b + i0] * (1 - tx) + lo[b + i1] * tx) * ty;
+        const h = (hi[a + i0] * (1 - tx) + hi[a + i1] * tx) * (1 - ty) + (hi[b + i0] * (1 - tx) + hi[b + i1] * tx) * ty;
+        const o = (y * W + x) * 4;
+        const span = h - l;
+        const v = span < 16 ? 128 : ((d[o + 1] - l) * 255) / span;   // flat areas stay neutral grey
+        d[o] = d[o + 1] = d[o + 2] = v < 0 ? 0 : v > 255 ? 255 : v;
+      }
+    }
+    return image;
+  }
 
   // ---------------------------------------------------------------- native detector (Android)
   const NATIVE_NAMES = {
@@ -377,12 +436,17 @@
       this.timer = setTimeout(() => this.tick(), 60);
     },
 
-    async read(sx, sy, sw, sh, dw, dh, opts = READ_OPTS) {
+    async read(sx, sy, sw, sh, dw, dh, opts = READ_OPTS, invert = false, stretch = false) {
       const canvas = this.canvas;
       if (canvas.width !== dw) canvas.width = dw;
       if (canvas.height !== dh) canvas.height = dh;
       this.ctx.drawImage($('video'), sx, sy, sw, sh, 0, 0, dw, dh);
       const image = this.ctx.getImageData(0, 0, dw, dh);
+      if (invert || stretch) {
+        if (stretch) stretchContrast(image);
+        if (invert) invertImage(image);
+        this.ctx.putImageData(image, 0, 0);
+      }
       return ZXingWASM.readBarcodes(image, opts);
     },
 
@@ -407,7 +471,7 @@
       if (valid.length) return { valid, invalid: false };
 
       // Extra passes take turns, one per frame, so the camera stays smooth
-      const turn = this.frameNo % 3;
+      const turn = this.frameNo % 4;
       if (turn === 0) {
         // Center of the picture, enlarged – small barcodes
         const cw = Math.round(vw * 0.6);
@@ -420,6 +484,21 @@
         const cw = Math.round(vw * 0.7);
         const ch = Math.round(vh * 0.7);
         valid = take(await this.read(Math.round((vw - cw) / 2), Math.round((vh - ch) / 2), cw, ch, cw, ch, READ_DENSE));
+      } else if (turn === 3) {
+        // Light bars on a dark background (PS5 and other consoles): inverted picture.
+        // Whole picture first, then the center at full resolution for small, dense serials.
+        const scale2 = Math.min(1, 1600 / Math.max(vw, vh));
+        valid = take(await this.read(0, 0, vw, vh, Math.round(vw * scale2), Math.round(vh * scale2), READ_OPTS, true));
+        if (!valid.length) {
+          const native2 = await nativeDetect(this.canvas);
+          if (native2.length) return { valid: native2, invalid: false };
+          // center band, enlarged up to ×2 – tiny etched serials are only ~2 pixels per bar
+          const cw = Math.round(vw * 0.7);
+          const ch = Math.round(vh * 0.45);
+          const factor = Math.max(1, Math.min(2, 2400 / Math.max(cw, ch)));
+          valid = take(await this.read(Math.round((vw - cw) / 2), Math.round((vh - ch) / 2), cw, ch,
+            Math.round(cw * factor), Math.round(ch * factor), READ_DENSE, true, true));
+        }
       } else {
         // Wide band through the center (barcode lying down), then a tall band (barcode standing up),
         // at full resolution – enlarged when the camera picture is small
@@ -955,9 +1034,23 @@
       canvas.width = Math.round(W * scale);
       canvas.height = Math.round(H * scale);
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      const results = await ZXingWASM.readBarcodes(ctx.getImageData(0, 0, canvas.width, canvas.height), READ_DENSE);
+      const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      let results = await ZXingWASM.readBarcodes(image, READ_DENSE);
       add(results);
       invalid = invalid || results.some((r) => !r.isValid && r.text);
+      if (found.size) break;
+      // light bars on a dark background (PS5 and other consoles)
+      results = await ZXingWASM.readBarcodes(invertImage(image), READ_DENSE);
+      add(results);
+      if (found.size) break;
+      ctx.putImageData(image, 0, 0);
+      add(await nativeDetect(canvas));
+      if (found.size) break;
+      // faint bars: local contrast stretch, dark-on-light and light-on-dark
+      stretchContrast(image);
+      add(await ZXingWASM.readBarcodes(image, READ_DENSE));
+      if (found.size) break;
+      add(await ZXingWASM.readBarcodes(invertImage(image), READ_DENSE));
       if (found.size) break;
     }
     if (img.close) img.close();
