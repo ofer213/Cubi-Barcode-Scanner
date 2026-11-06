@@ -13,7 +13,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-  <link rel="stylesheet" href="style.css?v=1.2.2">
+  <link rel="stylesheet" href="style.css?v=1.3.0">
 </head>
 <body>
   <div class="app">
@@ -61,11 +61,22 @@
         <button type="button" class="tool" id="btnTorch" hidden aria-label="פנס">
           <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M7 2h10v4l-3 4v12h-4V10L7 6V2zm2 2v1.4l3 4V20h0V9.4l3-4V4H9z"/></svg>
         </button>
+        <button type="button" class="tool" id="btnFocus" hidden aria-label="מיקוד">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M11 2h2v3.07A7 7 0 0 1 18.93 11H22v2h-3.07A7 7 0 0 1 13 18.93V22h-2v-3.07A7 7 0 0 1 5.07 13H2v-2h3.07A7 7 0 0 1 11 5.07V2zm1 5a5 5 0 1 0 0 10 5 5 0 0 0 0-10zm0 3a2 2 0 1 1 0 4 2 2 0 0 1 0-4z"/></svg>
+        </button>
+        <button type="button" class="tool" id="btnSwitchCam" hidden aria-label="החלף מצלמה">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M9 3 7.2 5H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.2L15 3H9zm3 4a5 5 0 0 1 4.9 4H19l-3 3.5-3-3.5h1.8A3 3 0 0 0 12 9a3 3 0 0 0-2.1.9L8.5 8.5A5 5 0 0 1 12 7zm-4 5 3 3.5H9.2A3 3 0 0 0 12 17a3 3 0 0 0 2.1-.9l1.4 1.4A5 5 0 0 1 7.1 15H5l3-3z"/></svg>
+        </button>
+        <label class="zoom" id="focusWrap" hidden>
+          <span>פוקוס</span>
+          <input type="range" id="focus" min="0" max="1" step="0.01" value="0">
+        </label>
         <label class="zoom" id="zoomWrap" hidden>
           <span>זום</span>
           <input type="range" id="zoom" min="1" max="1" step="0.1" value="1">
         </label>
       </div>
+      <div class="focus-ring" id="focusRing" aria-hidden="true"></div>
       <div class="hint" id="hint" hidden></div>
     </section>
 
@@ -82,6 +93,11 @@
         <span id="btnPhotoText">סרוק מתמונה</span>
       </button>
       <input type="file" id="photoInput" accept="image/*" multiple hidden>
+      <button type="button" class="secondary photo-btn" id="btnText">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M3 3h6v2H5v4H3V3zm12 0h6v6h-2V5h-4V3zM3 15h2v4h4v2H3v-6zm16 4v-4h2v6h-6v-2h4zM7 7h10v2.5h-2V9h-2v6h1.5v2h-5v-2H11V9H9v.5H7V7z"/></svg>
+        <span id="btnTextText">טקסט מתמונה</span>
+      </button>
+      <input type="file" id="textInput" accept="image/*" multiple hidden>
     </div>
 
     <section class="panel" id="panelPc" hidden>
@@ -164,6 +180,14 @@
           <option value="4">אחרי 4 שניות</option>
         </select>
       </label>
+      <label class="field-row">
+        <span>שפת טקסט מתמונה</span>
+        <select id="setOcrLang">
+          <option value="heb+eng">עברית ואנגלית</option>
+          <option value="eng">אנגלית ומספרים בלבד</option>
+          <option value="heb">עברית בלבד</option>
+        </select>
+      </label>
       <p class="muted small">קוד שנשאר מול המצלמה לא נסרק שוב. כדי לסרוק אותו שוב, מרחיקים אותו מהמצלמה לזמן שנבחר.</p>
       <div class="sheet-actions"><button class="primary" value="close">סגור</button></div>
     </form>
@@ -193,10 +217,10 @@
     </form>
   </dialog>
 
-  <script src="vendor/zxing-reader.js?v=1.2.2"></script>
-  <script src="vendor/xlsx.mini.min.js?v=1.2.2"></script>
-  <script src="vendor/mqtt.min.js?v=1.2.2"></script>
-  <script src="remote.js?v=1.2.2"></script>
-  <script src="app.js?v=1.2.2"></script>
+  <script src="vendor/zxing-reader.js?v=1.3.0"></script>
+  <script src="vendor/xlsx.mini.min.js?v=1.3.0"></script>
+  <script src="vendor/mqtt.min.js?v=1.3.0"></script>
+  <script src="remote.js?v=1.3.0"></script>
+  <script src="app.js?v=1.3.0"></script>
 </body>
 </html>

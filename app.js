@@ -5,9 +5,9 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.2.2';
+  const APP_VERSION = '1.3.0';
   const STORE = { settings: 'cubey.settings.v1', list: 'cubey.list.v1', history: 'cubey.history.v1' };
-  const DEFAULTS = { target: 'phone', mode: 'continuous', beep: true, vibrate: true, wake: true, repeat: 1.5, sumQty: false };
+  const DEFAULTS = { target: 'phone', mode: 'continuous', beep: true, vibrate: true, wake: true, repeat: 1.5, sumQty: false, cameraId: '', ocrLang: 'heb+eng' };
   const HISTORY_MAX = 50;
   const READ_OPTS = {
     formats: [],               // all supported formats
@@ -160,6 +160,7 @@
     return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${formatTime(ts)}`;
   }
   function formatName(format) {
+    if (format === 'TEXT') return 'טקסט מתמונה';
     return String(format || '').replace(/([a-z])([A-Z0-9])/g, '$1 $2');
   }
 
@@ -254,6 +255,41 @@
 
   // ---------------------------------------------------------------- decoder
   let zxingReady = null;
+  // ---------------------------------------------------------------- camera
+  let backCameras = [];
+  const CAMERA_SIZE = { width: { ideal: 3840 }, height: { ideal: 2160 } };
+
+  // Opens a camera: the chosen one (deviceId), otherwise the back camera. Asks for continuous
+  // autofocus already when opening – some Android phones ignore it when it is only set afterwards.
+  async function openCamera(deviceId) {
+    const base = Object.assign({}, CAMERA_SIZE, { focusMode: { ideal: 'continuous' } });
+    if (deviceId) {
+      try {
+        return await navigator.mediaDevices.getUserMedia({ audio: false, video: Object.assign({ deviceId: { exact: deviceId } }, base) });
+      } catch (e) {
+        if (settings.cameraId === deviceId) { settings.cameraId = ''; saveSettings(); }
+      }
+    }
+    // as sharp as the camera allows (4K when available) – thin bars of long serial-number barcodes need it
+    return navigator.mediaDevices.getUserMedia({ audio: false, video: Object.assign({ facingMode: { ideal: 'environment' } }, base) });
+  }
+
+  // Back cameras, main camera first ("camera2 0" / "camera 0" on Android is normally the main lens)
+  async function listBackCameras() {
+    try {
+      const all = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
+      const front = /front|user|selfie|facetime|קדמית/i;
+      let back = all.filter((d) => !front.test(d.label));
+      if (!back.length) back = all;
+      const num = (d) => { const m = /(\d+)\s*,/.exec(d.label || '') || /(\d+)\D*$/.exec(d.label || ''); return m ? Number(m[1]) : 99; };
+      back.sort((a, b) => num(a) - num(b));
+      backCameras = back;
+    } catch (e) {
+      backCameras = [];
+    }
+    return backCameras;
+  }
+
   function prepareDecoder() {
     if (!zxingReady) {
       zxingReady = ZXingWASM.prepareZXingModule({
@@ -305,11 +341,7 @@
 
       let stream = null;
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          // as sharp as the camera allows (4K when available) – thin bars of long serial-number barcodes need it
-          video: { facingMode: { ideal: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 } },
-        });
+        stream = await openCamera(settings.cameraId);
       } catch (e) {
         if (e && (e.name === 'OverconstrainedError' || e.name === 'NotFoundError')) {
           try { stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true }); } catch (e2) { e = e2; }
@@ -334,6 +366,10 @@
       try { await video.play(); } catch (e) { /* autoplay with muted+playsinline normally works */ }
 
       this.track = stream.getVideoTracks()[0];
+      // Some phones give a back camera without autofocus (wide-angle / depth lens) –
+      // switch to the main back camera when that happens
+      await listBackCameras();
+      if (!this.hasAutofocus(this.track) && !settings.cameraId) await this.findAutofocusCamera(video);
       this.setupTrackFeatures();
       this.canvas = $('canvas');
       this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
@@ -354,6 +390,8 @@
       this.stream = null;
       this.track = null;
       this.torchOn = false;
+      clearInterval(this.focusTimer);
+      this.focusTimer = null;
       const video = $('video');
       video.srcObject = null;
       $('camera').classList.remove('live');
@@ -368,9 +406,9 @@
       let caps = {};
       try { caps = track.getCapabilities ? track.getCapabilities() : {}; } catch (e) { caps = {}; }
 
-      if (Array.isArray(caps.focusMode) && caps.focusMode.includes('continuous')) {
-        track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
-      }
+      this.caps = caps;
+      this.setupFocus(track, caps);
+      $('btnSwitchCam').hidden = backCameras.length < 2;
 
       const torchBtn = $('btnTorch');
       torchBtn.hidden = !caps.torch;
@@ -389,6 +427,143 @@
       } else {
         zoomWrap.hidden = true;
       }
+    },
+
+    hasAutofocus(track) {
+      let caps = {};
+      try { caps = track.getCapabilities ? track.getCapabilities() : {}; } catch (e) { return true; }
+      // no focus information at all (iPhone/Safari, Firefox): the phone focuses by itself
+      if (!caps || !Array.isArray(caps.focusMode) || !caps.focusMode.length) return true;
+      return caps.focusMode.includes('continuous') || caps.focusMode.includes('single-shot');
+    },
+
+    async findAutofocusCamera(video) {
+      const current = this.track && this.track.getSettings ? this.track.getSettings().deviceId : '';
+      const others = backCameras.filter((c) => c.deviceId && c.deviceId !== current);
+      if (!others.length) return;
+      // many phones cannot open two cameras at once – close the current one first
+      this.stream.getTracks().forEach((t) => t.stop());
+      for (const cam of others) {
+        let stream = null;
+        try { stream = await openCamera(cam.deviceId); } catch (e) { continue; }
+        const track = stream.getVideoTracks()[0];
+        if (this.hasAutofocus(track)) {
+          this.stream = stream;
+          this.track = track;
+          video.srcObject = stream;
+          try { await video.play(); } catch (e) { /* ignore */ }
+          return;
+        }
+        stream.getTracks().forEach((t) => t.stop());
+      }
+      // none has autofocus – back to the first camera
+      const stream = await openCamera(current).catch(() => openCamera(''));
+      this.stream = stream;
+      this.track = stream.getVideoTracks()[0];
+      video.srcObject = stream;
+      try { await video.play(); } catch (e) { /* ignore */ }
+    },
+
+    // Autofocus: continuous when the camera supports it; otherwise single-shot focus repeated every
+    // 2.5 s; a manual focus slider when the camera only has manual focus.
+    setupFocus(track, caps) {
+      clearInterval(this.focusTimer);
+      this.focusTimer = null;
+      const modes = Array.isArray(caps.focusMode) ? caps.focusMode : [];
+      this.focusModes = modes;
+      const focusWrap = $('focusWrap');
+      focusWrap.hidden = true;
+      if (modes.includes('continuous')) {
+        track.applyConstraints({ focusMode: 'continuous' })
+          .catch(() => track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }))
+          .catch(() => {});
+      } else if (modes.includes('single-shot')) {
+        const shot = () => { if (this.track === track) track.applyConstraints({ advanced: [{ focusMode: 'single-shot' }] }).catch(() => {}); };
+        shot();
+        this.focusTimer = setInterval(shot, 2500);
+      } else if (modes.includes('manual') && caps.focusDistance && caps.focusDistance.max > caps.focusDistance.min) {
+        const f = $('focus');
+        f.min = caps.focusDistance.min;
+        f.max = caps.focusDistance.max;
+        f.step = caps.focusDistance.step || (caps.focusDistance.max - caps.focusDistance.min) / 100;
+        let current = caps.focusDistance.min;
+        try { current = track.getSettings().focusDistance || current; } catch (e) { /* ignore */ }
+        f.value = current;
+        focusWrap.hidden = false;
+      }
+      $('btnFocus').hidden = false;
+    },
+
+    // Tap on the picture / ⌖ button: focus again (on the tapped point when the camera supports it)
+    async refocus(x, y) {
+      const track = this.track;
+      if (!track) return;
+      const ring = $('focusRing');
+      if (x !== undefined) {
+        ring.style.left = `${x * 100}%`;
+        ring.style.top = `${y * 100}%`;
+      } else {
+        ring.style.left = '50%';
+        ring.style.top = '50%';
+      }
+      ring.classList.remove('on');
+      void ring.offsetWidth;
+      ring.classList.add('on');
+      const modes = this.focusModes || [];
+      const caps = this.caps || {};
+      const point = x !== undefined && 'pointsOfInterest' in caps ? [{ x, y }] : null;
+      try {
+        if (modes.includes('single-shot')) {
+          const c = { focusMode: 'single-shot' };
+          if (point) c.pointsOfInterest = point;
+          await track.applyConstraints({ advanced: [c] });
+          if (modes.includes('continuous')) {
+            setTimeout(() => {
+              if (this.track === track) track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
+            }, 1500);
+          }
+        } else if (modes.includes('continuous')) {
+          // switching the focus mode makes the lens search for focus again
+          if (modes.includes('manual')) await track.applyConstraints({ advanced: [{ focusMode: 'manual' }] }).catch(() => {});
+          const c = { focusMode: 'continuous' };
+          if (point) c.pointsOfInterest = point;
+          await track.applyConstraints({ advanced: [c] });
+        }
+      } catch (e) { /* ignore */ }
+    },
+
+    async setFocusDistance(value) {
+      if (!this.track) return;
+      try { await this.track.applyConstraints({ advanced: [{ focusMode: 'manual', focusDistance: Number(value) }] }); } catch (e) { /* ignore */ }
+    },
+
+    // Next back camera (phones with several lenses)
+    async switchCamera() {
+      await listBackCameras();
+      if (backCameras.length < 2 || !this.track) return;
+      const current = this.track.getSettings ? this.track.getSettings().deviceId : '';
+      const i = backCameras.findIndex((c) => c.deviceId === current);
+      const next = backCameras[(i + 1) % backCameras.length];
+      let stream = null;
+      try {
+        this.stream.getTracks().forEach((t) => t.stop());
+        stream = await openCamera(next.deviceId);
+      } catch (e) {
+        toast('לא ניתן לעבור למצלמה הזו');
+        try { stream = await openCamera(''); } catch (e2) { this.stop(); return; }
+      }
+      settings.cameraId = next.deviceId;
+      saveSettings();
+      this.stream = stream;
+      this.track = stream.getVideoTracks()[0];
+      const video = $('video');
+      video.srcObject = stream;
+      try { await video.play(); } catch (e) { /* ignore */ }
+      this.torchOn = false;
+      $('btnTorch').setAttribute('aria-pressed', 'false');
+      this.setupTrackFeatures();
+      const n = backCameras.findIndex((c) => c.deviceId === next.deviceId) + 1;
+      toast(`מצלמה אחורית ${n} מתוך ${backCameras.length}${this.hasAutofocus(this.track) ? '' : ' (ללא פוקוס אוטומטי)'}`);
     },
 
     async toggleTorch() {
@@ -550,9 +725,13 @@
     beep();
     vibrate();
     flash();
+    const isText = format === 'TEXT';
+    // text from a photo: keeps its lines only when copied on the phone; one line for the PC / list
+    const multiline = code;
+    if (isText) code = cleanText(code).replace(/ {2,}/g, ' ').slice(0, 4000);
 
     // A station QR code pairs this phone, in any mode
-    if (code.includes('#pair=')) {
+    if (!isText && code.includes('#pair=')) {
       const station = remote.pair(code);
       if (station) {
         toast(`העמדה "${station.name}" חוברה ✓`, 2600);
@@ -602,7 +781,8 @@
       return;
     }
 
-    copyText(code).then((ok) => {
+    if (isText) entry.full = multiline;
+    copyText(isText ? multiline : code).then((ok) => {
       entry.copied = ok;
       saveHistory();
       renderHistory();
@@ -629,7 +809,7 @@
         class: 'chip-btn ' + (item.copied ? 'copied' : 'copy'),
         text: item.copied ? 'הועתק ✓' : 'העתק',
         onclick: async () => {
-          const ok = await copyText(item.code);
+          const ok = await copyText(item.full || item.code);
           item.copied = ok;
           saveHistory();
           renderHistory();
@@ -902,6 +1082,24 @@
       scanPhotos(files);
     });
     $('zoom').addEventListener('input', (e) => scanner.setZoom(e.target.value));
+    $('focus').addEventListener('input', (e) => scanner.setFocusDistance(e.target.value));
+    $('btnFocus').addEventListener('click', () => scanner.refocus());
+    $('btnSwitchCam').addEventListener('click', () => scanner.switchCamera());
+    $('video').addEventListener('click', (e) => {
+      if (!scanner.running) return;
+      const r = e.currentTarget.getBoundingClientRect();
+      scanner.refocus((e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
+    });
+    $('btnText').addEventListener('click', () => {
+      ensureAudio();
+      if (scanner.running) readTextFromCamera();
+      else $('textInput').click();
+    });
+    $('textInput').addEventListener('change', (e) => {
+      const files = [...e.target.files];
+      e.target.value = '';
+      readTextFromPhotos(files);
+    });
 
     $('sumQty').checked = !!settings.sumQty;
     $('sumQty').addEventListener('change', (e) => {
@@ -954,6 +1152,7 @@
       $('setVibrate').checked = !!settings.vibrate;
       $('setWake').checked = !!settings.wake;
       $('setRepeat').value = String(settings.repeat);
+      $('setOcrLang').value = settings.ocrLang || 'heb+eng';
       if (typeof dialog.showModal === 'function') dialog.showModal();
       else dialog.setAttribute('open', '');
     });
@@ -961,6 +1160,7 @@
     $('setVibrate').addEventListener('change', (e) => { settings.vibrate = e.target.checked; saveSettings(); });
     $('setWake').addEventListener('change', (e) => { settings.wake = e.target.checked; saveSettings(); });
     $('setRepeat').addEventListener('change', (e) => { settings.repeat = Number(e.target.value); saveSettings(); });
+    $('setOcrLang').addEventListener('change', (e) => { settings.ocrLang = e.target.value; saveSettings(); });
 
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden' && scanner.running) scanner.stop();
@@ -1093,6 +1293,178 @@
     } finally {
       btn.disabled = false;
       $('btnPhotoText').textContent = 'סרוק מתמונה';
+    }
+  }
+
+  // ---------------------------------------------------------------- text from a photo (OCR)
+  // Tesseract (Hebrew + English) runs on the phone itself; the engine (~7 MB) is downloaded on first use
+  // and kept by the browser afterwards.
+  const OCR_DIR = 'vendor/ocr/';
+  let ocrWorker = null;
+  let ocrWorkerLang = '';
+  let ocrScript = null;
+
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const tag = document.createElement('script');
+      tag.src = src;
+      tag.onload = resolve;
+      tag.onerror = () => reject(new Error('load ' + src));
+      document.head.appendChild(tag);
+    });
+  }
+
+  async function getOcrWorker(progress) {
+    const lang = settings.ocrLang || 'heb+eng';
+    if (ocrWorker && ocrWorkerLang === lang) return ocrWorker;
+    if (!ocrScript) ocrScript = loadScript(OCR_DIR + 'tesseract.min.js?v=' + APP_VERSION).catch((e) => { ocrScript = null; throw e; });
+    await ocrScript;
+    if (ocrWorker) { try { await ocrWorker.terminate(); } catch (e) { /* ignore */ } ocrWorker = null; }
+    const dir = new URL(OCR_DIR, location.href).href;
+    ocrWorker = await window.Tesseract.createWorker(lang.split('+'), 1 /* LSTM only */, {
+      workerPath: dir + 'worker.min.js',
+      corePath: dir,
+      langPath: dir,
+      workerBlobURL: false,
+      gzip: true,
+      logger: (m) => { if (progress && m && typeof m.progress === 'number') progress(m.status, m.progress); },
+    });
+    await ocrWorker.setParameters({ preserve_interword_spaces: '1', user_defined_dpi: '300' });
+    ocrWorkerLang = lang;
+    return ocrWorker;
+  }
+
+  // Picture → canvas ready for OCR: gray, large enough (small text needs ~30 px letters),
+  // dark-on-light (light text on a dark label is turned around), turned by `turn` quarter turns
+  function ocrCanvas(source, W, H, turn = 0) {
+    const scale = Math.min(2.5, Math.max(1, 1800 / Math.max(W, H)), 3200 / Math.max(W, H));
+    const w = Math.round(W * scale);
+    const h = Math.round(H * scale);
+    const c = document.createElement('canvas');
+    const side = turn % 2 === 1;
+    c.width = side ? h : w;
+    c.height = side ? w : h;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.translate(c.width / 2, c.height / 2);
+    ctx.rotate(turn * Math.PI / 2);
+    ctx.drawImage(source, -w / 2, -h / 2, w, h);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    const img = ctx.getImageData(0, 0, c.width, c.height);
+    const d = img.data;
+    let sum = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      const g = (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000;
+      d[i] = d[i + 1] = d[i + 2] = g;
+      sum += g;
+    }
+    if (sum / (d.length / 4) < 100) invertImage(img);
+    ctx.putImageData(img, 0, 0);
+    return c;
+  }
+
+  // Lines with real words only – noise (random symbols from wood, fabric, shadows) is dropped
+  function cleanOcr(data) {
+    const lines = [];
+    const blocks = (data && data.blocks) || [];
+    for (const block of blocks) {
+      for (const para of block.paragraphs || []) {
+        for (const line of para.lines || []) {
+          const count = (t) => (String(t || '').match(/[0-9A-Za-zא-ת]/g) || []).length;
+          // short "words" are where noise shows up – they need a higher certainty
+          const words = (line.words || []).filter((w) => {
+            const n = count(w.text);
+            return n >= 3 ? w.confidence >= 50 : n > 0 && w.confidence >= 80;
+          });
+          if (!words.length) continue;
+          const avg = words.reduce((a, w) => a + w.confidence, 0) / words.length;
+          const longWords = words.filter((w) => count(w.text) >= 3).length;
+          const text = words.map((w) => w.text).join(' ').trim();
+          if (avg >= 65 && longWords >= 1 && longWords * 2 >= words.length) lines.push(text);
+        }
+      }
+    }
+    if (!blocks.length && data && data.text && data.confidence >= 75) {
+      for (const l of data.text.split('\n')) if (/[0-9A-Za-zא-ת]{2,}/.test(l)) lines.push(l.trim());
+    }
+    // direction marks that Tesseract adds around English inside Hebrew – invisible, but they would be typed
+    return lines.join('\n').replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '').trim();
+  }
+
+  async function ocrOne(source, W, H, progress) {
+    const worker = await getOcrWorker(progress);
+    let best = { text: '', score: 0 };
+    // upright first; the other directions only when little was read (photo taken sideways / upside down)
+    for (const turn of [0, 1, 3, 2]) {
+      const canvas = ocrCanvas(source, W, H, turn);
+      const { data } = await worker.recognize(canvas, {}, { blocks: true, text: true });
+      const text = cleanOcr(data);
+      const letters = (text.match(/[0-9A-Za-zא-ת]/g) || []).length;
+      const score = letters * (data.confidence || 0);
+      if (score > best.score) best = { text, score, conf: data.confidence || 0 };
+      if (best.conf >= 75 && letters >= 4) break;
+    }
+    // a single short word read with low certainty is almost always noise
+    const letters = (best.text.match(/[0-9A-Za-z\u05D0-\u05EA]/g) || []).length;
+    if (letters < 5 && (best.conf || 0) < 80) return '';
+    return best.text;
+  }
+
+  function ocrBusy(on, label) {
+    const btn = $('btnText');
+    btn.disabled = on;
+    $('btnTextText').textContent = on ? (label || 'מזהה טקסט…') : 'טקסט מתמונה';
+  }
+  const ocrProgress = (status, p) => {
+    if (/load|initializ/i.test(status) && p < 1) ocrBusy(true, 'טוען מנוע טקסט…');
+    else if (/recogniz/i.test(status)) ocrBusy(true, `מזהה טקסט… ${Math.round(p * 100)}%`);
+  };
+
+  function deliverText(text) {
+    if (!text) {
+      toast('לא זוהה טקסט ברור. צלם קרוב יותר, ישר, עם תאורה טובה.', 3500);
+      return false;
+    }
+    onScan(text, 'TEXT');
+    return true;
+  }
+
+  async function readTextFromPhotos(files) {
+    if (!files || !files.length) return;
+    if (scanner.running) scanner.stop();
+    ocrBusy(true);
+    try {
+      for (const file of files) {
+        const img = await loadPhoto(file);
+        const text = await ocrOne(img, img.width || img.naturalWidth, img.height || img.naturalHeight, ocrProgress);
+        if (img.close) img.close();
+        deliverText(text);
+      }
+    } catch (e) {
+      console.error(e);
+      toast('טעינת מנוע הטקסט נכשלה. בדוק חיבור לאינטרנט ונסה שוב.', 3500);
+    } finally {
+      ocrBusy(false);
+    }
+  }
+
+  // Camera is on: read the text from the current picture (full camera resolution)
+  async function readTextFromCamera() {
+    const video = $('video');
+    if (!video.videoWidth) return;
+    const c = document.createElement('canvas');
+    c.width = video.videoWidth;
+    c.height = video.videoHeight;
+    c.getContext('2d').drawImage(video, 0, 0);
+    flash();
+    if (settings.mode === 'single') scanner.stop();
+    ocrBusy(true);
+    try {
+      deliverText(await ocrOne(c, c.width, c.height, ocrProgress));
+    } catch (e) {
+      console.error(e);
+      toast('טעינת מנוע הטקסט נכשלה. בדוק חיבור לאינטרנט ונסה שוב.', 3500);
+    } finally {
+      ocrBusy(false);
     }
   }
 

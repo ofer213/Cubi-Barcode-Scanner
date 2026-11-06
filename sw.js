@@ -1,5 +1,5 @@
 /* Cubey Scanner service worker: works offline after the first visit. */
-const CACHE = 'cubey-scanner-v1.2.2';
+const CACHE = 'cubey-scanner-v1.3.0';
 const FILES = [
   './',
   'index.html',
