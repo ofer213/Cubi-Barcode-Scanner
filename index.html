@@ -13,7 +13,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-  <link rel="stylesheet" href="style.css?v=1.3.0">
+  <link rel="stylesheet" href="style.css?v=1.4.0">
 </head>
 <body>
   <div class="app">
@@ -30,6 +30,17 @@
         <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M19.14 12.94a7.07 7.07 0 0 0 .06-.94 7.07 7.07 0 0 0-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.03 7.03 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 2h-3.84a.5.5 0 0 0-.49.42l-.36 2.54c-.59.24-1.13.56-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.67 8.48a.5.5 0 0 0 .12.64l2.03 1.58a7.07 7.07 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.3.6.22l2.39-.96c.5.38 1.04.7 1.63.94l.36 2.54c.04.24.25.42.49.42h3.84c.24 0 .45-.18.49-.42l.36-2.54c.59-.24 1.13-.56 1.63-.94l2.39.96c.22.08.47 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg>
       </button>
     </header>
+
+    <nav class="kind-switch" role="tablist" aria-label="סוג סריקה">
+      <button type="button" role="tab" id="kindBarcode">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M3 5h2v14H3V5zm3 0h1v14H6V5zm2 0h2v14H8V5zm3 0h1v14h-1V5zm3 0h2v14h-2V5zm3 0h1v14h-1V5zm2 0h2v14h-2V5z"/></svg>
+        סריקת ברקוד
+      </button>
+      <button type="button" role="tab" id="kindText">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M4 5h16v3h-2V7h-5v10h2v2H9v-2h2V7H6v1H4V5z"/></svg>
+        סריקת טקסט
+      </button>
+    </nav>
 
     <nav class="segmented" role="tablist" aria-label="לאן לשלוח את הסריקה">
       <button type="button" role="tab" data-target="pc" id="tabPc">
@@ -84,10 +95,14 @@
       <button type="button" class="primary" id="btnScan">
         <span id="btnScanText">התחל סריקה</span>
       </button>
-      <div class="mode-toggle" role="radiogroup" aria-label="מצב סריקה">
+      <div class="mode-toggle" id="modeToggle" role="radiogroup" aria-label="מצב סריקה">
         <button type="button" role="radio" data-mode="single" id="modeSingle">בודדת</button>
         <button type="button" role="radio" data-mode="continuous" id="modeContinuous">רציפה</button>
       </div>
+      <button type="button" class="primary capture-btn" id="btnCapture" hidden>
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M4 5h3l2-2h6l2 2h3a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zm8 3.5a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9zm0 2a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z"/></svg>
+        <span id="btnCaptureText">צלם טקסט</span>
+      </button>
       <button type="button" class="secondary photo-btn" id="btnPhoto">
         <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M4 5h3l2-2h6l2 2h3a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zm8 3.5a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9zm0 2a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z"/></svg>
         <span id="btnPhotoText">סרוק מתמונה</span>
@@ -95,7 +110,7 @@
       <input type="file" id="photoInput" accept="image/*" multiple hidden>
       <button type="button" class="secondary photo-btn" id="btnText">
         <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M3 3h6v2H5v4H3V3zm12 0h6v6h-2V5h-4V3zM3 15h2v4h4v2H3v-6zm16 4v-4h2v6h-6v-2h4zM7 7h10v2.5h-2V9h-2v6h1.5v2h-5v-2H11V9H9v.5H7V7z"/></svg>
-        <span id="btnTextText">טקסט מתמונה</span>
+        <span id="btnTextText">טקסט מתמונה (גלריה / מצלמה)</span>
       </button>
       <input type="file" id="textInput" accept="image/*" multiple hidden>
     </div>
@@ -188,8 +203,23 @@
           <option value="heb">עברית בלבד</option>
         </select>
       </label>
+      <label class="switch-row"><span>הצג טקסט מתמונה לפני שליחה</span><input type="checkbox" id="setTextReview"></label>
       <p class="muted small">קוד שנשאר מול המצלמה לא נסרק שוב. כדי לסרוק אותו שוב, מרחיקים אותו מהמצלמה לזמן שנבחר.</p>
       <div class="sheet-actions"><button class="primary" value="close">סגור</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="sheet" id="textDialog">
+    <form method="dialog">
+      <h2>טקסט שזוהה</h2>
+      <p class="muted small" id="textDialogInfo">אפשר לתקן או למחוק חלק לפני השליחה.</p>
+      <textarea id="textResult" rows="7" dir="auto" spellcheck="false"></textarea>
+      <div class="sheet-actions text-actions">
+        <button type="button" class="primary" id="btnTextSend">שלח</button>
+        <button type="button" class="secondary" id="btnTextCopy">העתק</button>
+        <button type="button" class="secondary" id="btnTextRetry">תמונה אחרת</button>
+        <button class="secondary" value="close">סגור</button>
+      </div>
     </form>
   </dialog>
 
@@ -217,10 +247,10 @@
     </form>
   </dialog>
 
-  <script src="vendor/zxing-reader.js?v=1.3.0"></script>
-  <script src="vendor/xlsx.mini.min.js?v=1.3.0"></script>
-  <script src="vendor/mqtt.min.js?v=1.3.0"></script>
-  <script src="remote.js?v=1.3.0"></script>
-  <script src="app.js?v=1.3.0"></script>
+  <script src="vendor/zxing-reader.js?v=1.4.0"></script>
+  <script src="vendor/xlsx.mini.min.js?v=1.4.0"></script>
+  <script src="vendor/mqtt.min.js?v=1.4.0"></script>
+  <script src="remote.js?v=1.4.0"></script>
+  <script src="app.js?v=1.4.0"></script>
 </body>
 </html>

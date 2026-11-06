@@ -5,9 +5,9 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.3.0';
+  const APP_VERSION = '1.4.0';
   const STORE = { settings: 'cubey.settings.v1', list: 'cubey.list.v1', history: 'cubey.history.v1' };
-  const DEFAULTS = { target: 'phone', mode: 'continuous', beep: true, vibrate: true, wake: true, repeat: 1.5, sumQty: false, cameraId: '', ocrLang: 'heb+eng' };
+  const DEFAULTS = { target: 'phone', mode: 'continuous', beep: true, vibrate: true, wake: true, repeat: 1.5, sumQty: false, cameraId: '', ocrLang: 'heb+eng', textReview: true, kind: 'barcode' };
   const HISTORY_MAX = 50;
   const READ_OPTS = {
     formats: [],               // all supported formats
@@ -369,7 +369,9 @@
       // Some phones give a back camera without autofocus (wide-angle / depth lens) –
       // switch to the main back camera when that happens
       await listBackCameras();
+      if (!settings.cameraId) await this.useMainCamera(video);
       if (!this.hasAutofocus(this.track) && !settings.cameraId) await this.findAutofocusCamera(video);
+      this.lastRead = performance.now();
       this.setupTrackFeatures();
       this.canvas = $('canvas');
       this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
@@ -422,6 +424,12 @@
         zoom.step = caps.zoom.step || 0.1;
         let current = caps.zoom.min;
         try { current = track.getSettings().zoom || caps.zoom.min; } catch (e) { /* ignore */ }
+        // Close up, phone lenses cannot focus (minimum focus distance ~10–20 cm). Starting at ×1.5
+        // makes people hold the phone farther away, where the autofocus works.
+        if (!this.zoomTouched && current <= caps.zoom.min + 0.01 && caps.zoom.min <= 1 && caps.zoom.max >= 1.5) {
+          current = 1.5;
+          track.applyConstraints({ advanced: [{ zoom: current }] }).catch(() => {});
+        }
         zoom.value = current;
         zoomWrap.hidden = false;
       } else {
@@ -435,6 +443,22 @@
       // no focus information at all (iPhone/Safari, Firefox): the phone focuses by itself
       if (!caps || !Array.isArray(caps.focusMode) || !caps.focusMode.length) return true;
       return caps.focusMode.includes('continuous') || caps.focusMode.includes('single-shot');
+    },
+
+    // Android names its cameras "camera2 0, facing back" … – number 0 is the main lens (with autofocus).
+    // Chrome sometimes opens another back lens (wide / macro / depth) that cannot focus on a label.
+    async useMainCamera(video) {
+      const main = backCameras[0];
+      if (!main || !/camera\s*\d*\s*0\s*,/i.test(main.label || '')) return;
+      const current = this.track && this.track.getSettings ? this.track.getSettings().deviceId : '';
+      if (!current || current === main.deviceId) return;
+      this.stream.getTracks().forEach((t) => t.stop());
+      let stream = null;
+      try { stream = await openCamera(main.deviceId); } catch (e) { stream = await openCamera(current).catch(() => openCamera('')); }
+      this.stream = stream;
+      this.track = stream.getVideoTracks()[0];
+      video.srcObject = stream;
+      try { await video.play(); } catch (e) { /* ignore */ }
     },
 
     async findAutofocusCamera(video) {
@@ -495,9 +519,10 @@
     },
 
     // Tap on the picture / ⌖ button: focus again (on the tapped point when the camera supports it)
-    async refocus(x, y) {
+    async refocus(x, y, quiet = false) {
       const track = this.track;
       if (!track) return;
+      if (quiet) return this.refocusLens(track);
       const ring = $('focusRing');
       if (x !== undefined) {
         ring.style.left = `${x * 100}%`;
@@ -509,6 +534,10 @@
       ring.classList.remove('on');
       void ring.offsetWidth;
       ring.classList.add('on');
+      return this.refocusLens(track, x, y);
+    },
+
+    async refocusLens(track, x, y) {
       const modes = this.focusModes || [];
       const caps = this.caps || {};
       const point = x !== undefined && 'pointsOfInterest' in caps ? [{ x, y }] : null;
@@ -580,6 +609,7 @@
 
     async setZoom(value) {
       if (!this.track) return;
+      this.zoomTouched = true;
       try { await this.track.applyConstraints({ advanced: [{ zoom: Number(value) }] }); } catch (e) { /* ignore */ }
     },
 
@@ -597,6 +627,16 @@
     tick() {
       if (!this.running) return;
       const video = $('video');
+      if (settings.kind === 'text' && !pairMode) {
+        // text mode: the camera is only a viewfinder – barcodes are not read
+        this.timer = setTimeout(() => this.tick(), 250);
+        return;
+      }
+      const now = performance.now();
+      if (now - (this.lastRead || now) > 3000 && now - (this.lastRefocus || 0) > 3000) {
+        this.lastRefocus = now;
+        this.refocus(undefined, undefined, true);
+      }
       if (!this.busy && video.readyState >= 2 && video.videoWidth > 0) {
         this.busy = true;
         this.decodeFrame(video)
@@ -691,6 +731,7 @@
     },
 
     handleResult({ valid, invalid }) {
+      if (valid.length) this.lastRead = performance.now();
       const now = performance.now() / 1000;
       const fresh = [];
       for (const r of valid) {
@@ -942,6 +983,7 @@
   }
 
   function startPairing() {
+    if (settings.kind === 'text') setKind('barcode');
     setTarget('pc');
     pairMode = true;
     setIdle('סרוק את קוד ה-QR שמוצג במסך המחשב');
@@ -1028,8 +1070,27 @@
     const text = $('btnScanText');
     btn.disabled = state === 'busy';
     btn.classList.toggle('stop', state === 'running');
-    text.textContent = state === 'running' ? 'עצור סריקה' : state === 'busy' ? 'פותח מצלמה…' : 'התחל סריקה';
+    const isText = settings.kind === 'text';
+    text.textContent = state === 'running' ? (isText ? 'סגור מצלמה' : 'עצור סריקה')
+      : state === 'busy' ? 'פותח מצלמה…' : (isText ? 'פתח מצלמה' : 'התחל סריקה');
+    $('btnCapture').hidden = !(isText && state === 'running');
   }
+
+  // Barcode scanning / text scanning – chosen on the main screen
+  function setKind(kind) {
+    settings.kind = kind === 'text' ? 'text' : 'barcode';
+    saveSettings();
+    const isText = settings.kind === 'text';
+    $('kindBarcode').setAttribute('aria-selected', String(!isText));
+    $('kindText').setAttribute('aria-selected', String(isText));
+    $('camera').classList.toggle('text-mode', isText);
+    $('modeToggle').hidden = isText;
+    $('btnPhoto').hidden = isText;
+    $('btnText').hidden = !isText;
+    setScanButton(scanner.running ? 'running' : 'idle');
+    if (!scanner.running) setIdle(isText ? IDLE_TEXT_KIND : IDLE_TEXT[settings.target]);
+  }
+  const IDLE_TEXT_KIND = 'סריקת טקסט: פתח מצלמה, כוון לטקסט ולחץ "צלם טקסט" – או בחר תמונה. ברקודים לא נקראים במצב הזה.';
 
   const IDLE_TEXT = {
     pc: 'הסריקה תוקלד במחשב, בשדה שבו נמצא הסמן.',
@@ -1048,7 +1109,7 @@
     remote.setEnabled(target === 'pc');
     $('panelPhone').hidden = target === 'list';
     $('panelList').hidden = target !== 'list';
-    if (!scanner.running) setIdle(IDLE_TEXT[target]);
+    if (!scanner.running) setIdle(settings.kind === 'text' ? IDLE_TEXT_KIND : IDLE_TEXT[target]);
   }
 
   function setMode(mode) {
@@ -1090,11 +1151,22 @@
       const r = e.currentTarget.getBoundingClientRect();
       scanner.refocus((e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
     });
-    $('btnText').addEventListener('click', () => {
-      ensureAudio();
-      if (scanner.running) readTextFromCamera();
-      else $('textInput').click();
+    // "טקסט מתמונה" – always a photo (camera app or gallery); "Aa" on the live camera – the current picture
+    $('btnText').addEventListener('click', () => { ensureAudio(); $('textInput').click(); });
+    $('btnCapture').addEventListener('click', () => { ensureAudio(); readTextFromCamera(); });
+    $('kindBarcode').addEventListener('click', () => setKind('barcode'));
+    $('kindText').addEventListener('click', () => setKind('text'));
+    const tDlg = $('textDialog');
+    $('btnTextSend').addEventListener('click', () => {
+      const text = $('textResult').value.trim();
+      tDlg.close();
+      if (text) onScan(text, 'TEXT');
     });
+    $('btnTextCopy').addEventListener('click', async () => {
+      const ok = await copyText($('textResult').value.trim());
+      toast(ok ? 'הטקסט הועתק' : 'ההעתקה נכשלה');
+    });
+    $('btnTextRetry').addEventListener('click', () => { tDlg.close(); $('textInput').click(); });
     $('textInput').addEventListener('change', (e) => {
       const files = [...e.target.files];
       e.target.value = '';
@@ -1153,6 +1225,7 @@
       $('setWake').checked = !!settings.wake;
       $('setRepeat').value = String(settings.repeat);
       $('setOcrLang').value = settings.ocrLang || 'heb+eng';
+      $('setTextReview').checked = settings.textReview !== false;
       if (typeof dialog.showModal === 'function') dialog.showModal();
       else dialog.setAttribute('open', '');
     });
@@ -1161,6 +1234,7 @@
     $('setWake').addEventListener('change', (e) => { settings.wake = e.target.checked; saveSettings(); });
     $('setRepeat').addEventListener('change', (e) => { settings.repeat = Number(e.target.value); saveSettings(); });
     $('setOcrLang').addEventListener('change', (e) => { settings.ocrLang = e.target.value; saveSettings(); });
+    $('setTextReview').addEventListener('change', (e) => { settings.textReview = e.target.checked; saveSettings(); });
 
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden' && scanner.running) scanner.stop();
@@ -1173,6 +1247,7 @@
     bind();
     setupInstall();
     setMode(settings.mode === 'single' ? 'single' : 'continuous');
+    setKind(settings.kind);
     setTarget(['pc', 'phone', 'list'].includes(settings.target) ? settings.target : 'phone');
     renderHistory();
     renderList();
@@ -1324,7 +1399,7 @@
     ocrWorker = await window.Tesseract.createWorker(lang.split('+'), 1 /* LSTM only */, {
       workerPath: dir + 'worker.min.js',
       corePath: dir,
-      langPath: dir,
+      langPath: dir.replace(/\/$/, ''),
       workerBlobURL: false,
       gzip: true,
       logger: (m) => { if (progress && m && typeof m.progress === 'number') progress(m.status, m.progress); },
@@ -1358,8 +1433,71 @@
       sum += g;
     }
     if (sum / (d.length / 4) < 100) invertImage(img);
+    flattenLight(img);
     ctx.putImageData(img, 0, 0);
     return c;
+  }
+
+  // Evens out shadows and uneven light (phone photos): every pixel is divided by the paper
+  // brightness around it, so the text is dark on an even white background everywhere
+  function flattenLight(img) {
+    const { width: W, height: H, data: d } = img;
+    const B = 32;
+    const gw = Math.ceil(W / B);
+    const gh = Math.ceil(H / B);
+    const grid = new Float32Array(gw * gh);
+    for (let gy = 0; gy < gh; gy++) {
+      for (let gx = 0; gx < gw; gx++) {
+        // paper brightness of a block: a bright value that ignores a few noisy pixels
+        const hist = new Uint32Array(32);
+        let n = 0;
+        for (let y = gy * B; y < Math.min(H, gy * B + B); y += 2) {
+          for (let x = gx * B; x < Math.min(W, gx * B + B); x += 2) {
+            hist[d[(y * W + x) * 4] >> 3]++;
+            n++;
+          }
+        }
+        let acc = 0;
+        let v = 31;
+        for (; v > 0; v--) { acc += hist[v]; if (acc >= n * 0.1) break; }
+        grid[gy * gw + gx] = v * 8 + 4;
+      }
+    }
+    // smooth the brightness map (text-filled blocks borrow from their neighbours)
+    const sm = new Float32Array(gw * gh);
+    for (let pass = 0; pass < 2; pass++) {
+      for (let gy = 0; gy < gh; gy++) {
+        for (let gx = 0; gx < gw; gx++) {
+          let m = 0;
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              const yy = Math.min(gh - 1, Math.max(0, gy + dy));
+              const xx = Math.min(gw - 1, Math.max(0, gx + dx));
+              m = Math.max(m, grid[yy * gw + xx]);
+            }
+          }
+          sm[gy * gw + gx] = (m + grid[gy * gw + gx]) / 2;
+        }
+      }
+      grid.set(sm);
+    }
+    for (let y = 0; y < H; y++) {
+      const fy = Math.min(gh - 1.001, Math.max(0, y / B - 0.5));
+      const y0 = Math.floor(fy);
+      const ty = fy - y0;
+      for (let x = 0; x < W; x++) {
+        const fx = Math.min(gw - 1.001, Math.max(0, x / B - 0.5));
+        const x0 = Math.floor(fx);
+        const tx = fx - x0;
+        const i0 = y0 * gw + x0;
+        const i1 = Math.min(gh - 1, y0 + 1) * gw + x0;
+        const x1 = x0 + 1 < gw ? 1 : 0;
+        const bg = (grid[i0] * (1 - tx) + grid[i0 + x1] * tx) * (1 - ty) + (grid[i1] * (1 - tx) + grid[i1 + x1] * tx) * ty;
+        const i = (y * W + x) * 4;
+        const v = Math.min(255, d[i] * 240 / Math.max(40, bg));
+        d[i] = d[i + 1] = d[i + 2] = v;
+      }
+    }
   }
 
   // Lines with real words only – noise (random symbols from wood, fabric, shadows) is dropped
@@ -1412,7 +1550,8 @@
   function ocrBusy(on, label) {
     const btn = $('btnText');
     btn.disabled = on;
-    $('btnTextText').textContent = on ? (label || 'מזהה טקסט…') : 'טקסט מתמונה';
+    $('btnTextText').textContent = on ? (label || 'מזהה טקסט…') : 'טקסט מתמונה (גלריה / מצלמה)';
+    $('btnCaptureText').textContent = on ? (label || 'מזהה טקסט…') : 'צלם טקסט';
   }
   const ocrProgress = (status, p) => {
     if (/load|initializ/i.test(status) && p < 1) ocrBusy(true, 'טוען מנוע טקסט…');
@@ -1424,6 +1563,17 @@
       toast('לא זוהה טקסט ברור. צלם קרוב יותר, ישר, עם תאורה טובה.', 3500);
       return false;
     }
+    if (settings.textReview !== false) {
+      // show what was read first – fix / delete a part, then send
+      beep();
+      const dlg = $('textDialog');
+      $('textResult').value = text;
+      const dest = { pc: 'למחשב', phone: 'להעתקה בטלפון', list: 'לרשימה' }[settings.target] || '';
+      $('textDialogInfo').textContent = `אפשר לתקן או למחוק חלק, ואז "שלח"${dest ? ' – יישלח ' + dest : ''}.`;
+      if (dlg.open) dlg.close();
+      if (typeof dlg.showModal === 'function') dlg.showModal(); else dlg.setAttribute('open', '');
+      return true;
+    }
     onScan(text, 'TEXT');
     return true;
   }
@@ -1433,38 +1583,65 @@
     if (scanner.running) scanner.stop();
     ocrBusy(true);
     try {
+      const texts = [];
       for (const file of files) {
         const img = await loadPhoto(file);
         const text = await ocrOne(img, img.width || img.naturalWidth, img.height || img.naturalHeight, ocrProgress);
         if (img.close) img.close();
-        deliverText(text);
+        if (text) texts.push(text);
       }
+      deliverText(texts.join('\n\n'));
     } catch (e) {
       console.error(e);
-      toast('טעינת מנוע הטקסט נכשלה. בדוק חיבור לאינטרנט ונסה שוב.', 3500);
+      toast('זיהוי הטקסט נכשל: ' + String((e && (e.message || e)) || '').slice(0, 80), 6000);
     } finally {
       ocrBusy(false);
     }
   }
 
   // Camera is on: read the text from the current picture (full camera resolution)
-  async function readTextFromCamera() {
+  // A real photo from the camera (full sensor size; most Android phones focus before taking it);
+  // otherwise the current video picture
+  async function grabPhoto() {
+    const track = scanner.track;
+    if (track && window.ImageCapture) {
+      try {
+        const blob = await Promise.race([
+          new ImageCapture(track).takePhoto(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 6000)),
+        ]);
+        const img = await loadPhoto(blob);
+        if ((img.width || 0) > 0) return img;
+      } catch (e) { /* fall back to the video picture */ }
+    }
     const video = $('video');
-    if (!video.videoWidth) return;
     const c = document.createElement('canvas');
     c.width = video.videoWidth;
     c.height = video.videoHeight;
     c.getContext('2d').drawImage(video, 0, 0);
-    flash();
-    if (settings.mode === 'single') scanner.stop();
-    ocrBusy(true);
+    return c;
+  }
+
+  async function readTextFromCamera() {
+    const video = $('video');
+    if (!scanner.running || !video.videoWidth) return;
+    ocrBusy(true, 'מצלם…');
+    $('btnCapture').disabled = true;
     try {
-      deliverText(await ocrOne(c, c.width, c.height, ocrProgress));
+      await scanner.refocus(undefined, undefined, true);
+      await new Promise((r) => setTimeout(r, 400));
+      const pic = await grabPhoto();
+      flash();
+      beep();
+      ocrBusy(true);
+      deliverText(await ocrOne(pic, pic.width, pic.height, ocrProgress));
+      if (pic.close) pic.close();
     } catch (e) {
       console.error(e);
-      toast('טעינת מנוע הטקסט נכשלה. בדוק חיבור לאינטרנט ונסה שוב.', 3500);
+      toast('זיהוי הטקסט נכשל: ' + String((e && (e.message || e)) || '').slice(0, 80), 6000);
     } finally {
       ocrBusy(false);
+      $('btnCapture').disabled = false;
     }
   }
 
