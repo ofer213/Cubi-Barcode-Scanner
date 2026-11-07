@@ -5,7 +5,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.4.0';
+  const APP_VERSION = '1.4.2';
   const STORE = { settings: 'cubey.settings.v1', list: 'cubey.list.v1', history: 'cubey.history.v1' };
   const DEFAULTS = { target: 'phone', mode: 'continuous', beep: true, vibrate: true, wake: true, repeat: 1.5, sumQty: false, cameraId: '', ocrLang: 'heb+eng', textReview: true, kind: 'barcode' };
   const HISTORY_MAX = 50;
@@ -1396,14 +1396,15 @@
     await ocrScript;
     if (ocrWorker) { try { await ocrWorker.terminate(); } catch (e) { /* ignore */ } ocrWorker = null; }
     const dir = new URL(OCR_DIR, location.href).href;
-    ocrWorker = await window.Tesseract.createWorker(lang.split('+'), 1 /* LSTM only */, {
+    ocrWorker = await withTimeout(window.Tesseract.createWorker(lang.split('+'), 1 /* LSTM only */, {
       workerPath: dir + 'worker.min.js',
       corePath: dir,
       langPath: dir.replace(/\/$/, ''),
       workerBlobURL: false,
       gzip: true,
-      logger: (m) => { if (progress && m && typeof m.progress === 'number') progress(m.status, m.progress); },
-    });
+      logger: (m) => { if (m && typeof m.progress === 'number') ocrProgress(m.status, m.progress); },
+      errorHandler: (e) => console.error('OCR worker', e),
+    }), 90000, 'טעינת מנוע הטקסט לא הסתיימה תוך 90 שניות');
     await ocrWorker.setParameters({ preserve_interword_spaces: '1', user_defined_dpi: '300' });
     ocrWorkerLang = lang;
     return ocrWorker;
@@ -1411,8 +1412,9 @@
 
   // Picture → canvas ready for OCR: gray, large enough (small text needs ~30 px letters),
   // dark-on-light (light text on a dark label is turned around), turned by `turn` quarter turns
-  function ocrCanvas(source, W, H, turn = 0) {
-    const scale = Math.min(2.5, Math.max(1, 1800 / Math.max(W, H)), 3200 / Math.max(W, H));
+  function ocrCanvas(source, W, H, turn = 0, maxSide = 2000, flatten = true) {
+    // phone photos (4000 px) are made smaller: the phone's memory and speed are limited
+    const scale = Math.min(2.5, Math.max(1, 1800 / Math.max(W, H)), maxSide / Math.max(W, H));
     const w = Math.round(W * scale);
     const h = Math.round(H * scale);
     const c = document.createElement('canvas');
@@ -1432,8 +1434,10 @@
       d[i] = d[i + 1] = d[i + 2] = g;
       sum += g;
     }
+    // evening out shadows helps paper in uneven light, but hurts light text on dark labels –
+    // ocrOne tries both on a small copy and keeps the better one
     if (sum / (d.length / 4) < 100) invertImage(img);
-    flattenLight(img);
+    if (flatten) flattenLight(img);
     ctx.putImageData(img, 0, 0);
     return c;
   }
@@ -1508,16 +1512,16 @@
       for (const para of block.paragraphs || []) {
         for (const line of para.lines || []) {
           const count = (t) => (String(t || '').match(/[0-9A-Za-zא-ת]/g) || []).length;
-          // short "words" are where noise shows up – they need a higher certainty
-          const words = (line.words || []).filter((w) => {
-            const n = count(w.text);
-            return n >= 3 ? w.confidence >= 50 : n > 0 && w.confidence >= 80;
-          });
+          // A line counts only when it has at least one clearly read word (3+ letters, high certainty).
+          // Then its other words are kept too, even with low certainty – serial numbers like
+          // "-39FX3R" get low scores but are exactly what is wanted. Short bits need high certainty.
+          const all = (line.words || []).filter((w) => count(w.text) > 0);
+          if (!all.some((w) => count(w.text) >= 3 && w.confidence >= 60)) continue;
+          const words = all.filter((w) => (count(w.text) >= 3 ? w.confidence >= 20 : w.confidence >= 60));
           if (!words.length) continue;
           const avg = words.reduce((a, w) => a + w.confidence, 0) / words.length;
-          const longWords = words.filter((w) => count(w.text) >= 3).length;
           const text = words.map((w) => w.text).join(' ').trim();
-          if (avg >= 65 && longWords >= 1 && longWords * 2 >= words.length) lines.push(text);
+          if (avg >= 50) lines.push(text);
         }
       }
     }
@@ -1528,23 +1532,78 @@
     return lines.join('\n').replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '').trim();
   }
 
-  async function ocrOne(source, W, H, progress) {
-    const worker = await getOcrWorker(progress);
-    let best = { text: '', score: 0 };
-    // upright first; the other directions only when little was read (photo taken sideways / upside down)
-    for (const turn of [0, 1, 3, 2]) {
-      const canvas = ocrCanvas(source, W, H, turn);
-      const { data } = await worker.recognize(canvas, {}, { blocks: true, text: true });
-      const text = cleanOcr(data);
-      const letters = (text.match(/[0-9A-Za-zא-ת]/g) || []).length;
-      const score = letters * (data.confidence || 0);
-      if (score > best.score) best = { text, score, conf: data.confidence || 0 };
-      if (best.conf >= 75 && letters >= 4) break;
+  // A promise that gives up after ms (a stuck or crashed OCR engine would otherwise wait forever)
+  function withTimeout(promise, ms, message) {
+    let timer;
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message || 'timeout')), ms); }),
+    ]).finally(() => clearTimeout(timer));
+  }
+
+  async function killOcrWorker() {
+    const w = ocrWorker;
+    ocrWorker = null;
+    ocrWorkerLang = '';
+    if (w) { try { await w.terminate(); } catch (e) { /* ignore */ } }
+  }
+
+  let ocrStage = '';
+  // How much real text a quick pass found: letters in clearly read words
+  function textScore(data) {
+    let n = 0;
+    for (const block of (data && data.blocks) || []) {
+      for (const para of block.paragraphs || []) {
+        for (const line of para.lines || []) {
+          for (const w of line.words || []) {
+            const k = (String(w.text || '').match(/[0-9A-Za-z\u05D0-\u05EA]/g) || []).length;
+            if (k >= 3 && w.confidence >= 55) n += k;
+          }
+        }
+      }
     }
+    return n;
+  }
+
+  async function recognizeSafe(worker, canvas) {
+    try {
+      const { data } = await withTimeout(worker.recognize(canvas, {}, { blocks: true, text: true }), 60000, 'TIMEOUT');
+      return data;
+    } catch (e) {
+      // too long (or the engine crashed): restart the engine next time
+      await killOcrWorker();
+      throw new Error(e && e.message === 'TIMEOUT'
+        ? 'הזיהוי לקח יותר מדי זמן. צלם רק את האזור עם הטקסט, מקרוב.' : (e && e.message) || String(e));
+    }
+  }
+
+  async function ocrOne(source, W, H) {
+    const worker = await getOcrWorker();
+    // 1. Which way is up: quick reads of a small copy (upright first; the other directions only
+    //    when the upright one has little clear text)
+    const tries = [[0, true], [0, false], [1, true], [1, false], [3, true], [3, false], [2, true], [2, false]];
+    let best = { turn: 0, flat: true, score: -1 };
+    const started = Date.now();
+    for (let i = 0; i < tries.length; i++) {
+      if (i >= 2 && Date.now() - started > 20000) break;
+      const [turn, flat] = tries[i];
+      ocrStage = ` (בדיקה ${i + 1}/${tries.length})`;
+      const data = await recognizeSafe(worker, ocrCanvas(source, W, H, turn, 1200, flat));
+      const score = textScore(data);
+      if (score > best.score) best = { turn, flat, score };
+      // upright already reads well – no need to check the other directions
+      if (i === 1 && best.score >= 25) break;
+    }
+    // nothing that looks like words in any direction – no point in the slow full read
+    if (best.score < 6) { ocrStage = ''; return ''; }
+    // 2. The full read, only in the right direction and the better picture treatment
+    ocrStage = '';
+    const data = await recognizeSafe(worker, ocrCanvas(source, W, H, best.turn, 2000, best.flat));
+    const text = cleanOcr(data);
     // a single short word read with low certainty is almost always noise
-    const letters = (best.text.match(/[0-9A-Za-z\u05D0-\u05EA]/g) || []).length;
-    if (letters < 5 && (best.conf || 0) < 80) return '';
-    return best.text;
+    const letters = (text.match(/[0-9A-Za-z\u05D0-\u05EA]/g) || []).length;
+    if (letters < 5 && (data.confidence || 0) < 80) return '';
+    return text;
   }
 
   function ocrBusy(on, label) {
@@ -1555,7 +1614,7 @@
   }
   const ocrProgress = (status, p) => {
     if (/load|initializ/i.test(status) && p < 1) ocrBusy(true, 'טוען מנוע טקסט…');
-    else if (/recogniz/i.test(status)) ocrBusy(true, `מזהה טקסט… ${Math.round(p * 100)}%`);
+    else if (/recogniz/i.test(status)) ocrBusy(true, `מזהה טקסט… ${Math.round(p * 100)}%${ocrStage}`);
   };
 
   function deliverText(text) {
@@ -1586,14 +1645,14 @@
       const texts = [];
       for (const file of files) {
         const img = await loadPhoto(file);
-        const text = await ocrOne(img, img.width || img.naturalWidth, img.height || img.naturalHeight, ocrProgress);
+        const text = await ocrOne(img, img.width || img.naturalWidth, img.height || img.naturalHeight);
         if (img.close) img.close();
         if (text) texts.push(text);
       }
       deliverText(texts.join('\n\n'));
     } catch (e) {
       console.error(e);
-      toast('זיהוי הטקסט נכשל: ' + String((e && (e.message || e)) || '').slice(0, 80), 6000);
+      toast('זיהוי הטקסט נכשל: ' + String((e && (e.message || e)) || '').slice(0, 120), 7000);
     } finally {
       ocrBusy(false);
     }
@@ -1634,11 +1693,11 @@
       flash();
       beep();
       ocrBusy(true);
-      deliverText(await ocrOne(pic, pic.width, pic.height, ocrProgress));
+      deliverText(await ocrOne(pic, pic.width, pic.height));
       if (pic.close) pic.close();
     } catch (e) {
       console.error(e);
-      toast('זיהוי הטקסט נכשל: ' + String((e && (e.message || e)) || '').slice(0, 80), 6000);
+      toast('זיהוי הטקסט נכשל: ' + String((e && (e.message || e)) || '').slice(0, 120), 7000);
     } finally {
       ocrBusy(false);
       $('btnCapture').disabled = false;
