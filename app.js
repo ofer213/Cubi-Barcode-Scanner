@@ -5,7 +5,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.5.0';
+  const APP_VERSION = '1.5.1';
   const STORE = { settings: 'cubey.settings.v1', list: 'cubey.list.v1', history: 'cubey.history.v1' };
   const DEFAULTS = { target: 'phone', mode: 'continuous', beep: true, vibrate: true, wake: true, repeat: 1.5, sumQty: false, cameraId: '', ocrLang: 'heb+eng', textReview: true, kind: 'barcode', textKind: 'text', ocrModel: 'best' };
   const HISTORY_MAX = 50;
@@ -257,6 +257,44 @@
   let zxingReady = null;
   // ---------------------------------------------------------------- camera
   let backCameras = [];
+
+  // Two-finger zoom on the camera picture. The page itself does not zoom (touch-action without pinch-zoom on the
+  // camera box; Safari's own pinch gesture is cancelled there).
+  let lastPinchEnd = 0;
+  function setupPinchZoom() {
+    const box = $('camera');
+    const badge = $('zoomBadge');
+    let pinch = null;
+    let badgeTimer = null;
+    const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+    const showBadge = (z) => {
+      badge.textContent = `×${z.toFixed(1)}`;
+      badge.hidden = false;
+      clearTimeout(badgeTimer);
+      badgeTimer = setTimeout(() => { badge.hidden = true; }, 900);
+    };
+    box.addEventListener('touchstart', (e) => {
+      if (e.touches.length === 2 && scanner.running) {
+        pinch = { d: dist(e.touches), z: scanner.zoomLevel() };
+        e.preventDefault();
+      }
+    }, { passive: false });
+    box.addEventListener('touchmove', (e) => {
+      if (!pinch || e.touches.length !== 2) return;
+      e.preventDefault();
+      const r = scanner.zoomRange || { min: 1, max: 4 };
+      const z = Math.min(r.max, Math.max(r.min, pinch.z * (dist(e.touches) / pinch.d)));
+      scanner.setZoom(z);
+      showBadge(z);
+    }, { passive: false });
+    const end = (e) => {
+      if (pinch && e.touches.length < 2) { pinch = null; lastPinchEnd = performance.now(); }
+    };
+    box.addEventListener('touchend', end);
+    box.addEventListener('touchcancel', end);
+    // Safari (iPhone): its own page pinch inside the camera box is cancelled
+    for (const ev of ['gesturestart', 'gesturechange', 'gestureend']) box.addEventListener(ev, (e) => e.preventDefault());
+  }
   const CAMERA_SIZE = { width: { ideal: 3840 }, height: { ideal: 2160 } };
 
   // Opens a camera: the chosen one (deviceId), otherwise the back camera. Asks for continuous
@@ -416,12 +454,11 @@
       torchBtn.hidden = !caps.torch;
       torchBtn.setAttribute('aria-pressed', 'false');
 
-      const zoomWrap = $('zoomWrap');
-      const zoom = $('zoom');
+      // Zoom: two fingers on the picture (pinch). The camera's own zoom when it has one;
+      // otherwise the picture on the screen is enlarged.
+      this.setDigitalZoom(1);
       if (caps.zoom && caps.zoom.max > caps.zoom.min) {
-        zoom.min = caps.zoom.min;
-        zoom.max = Math.min(caps.zoom.max, caps.zoom.min * 8);
-        zoom.step = caps.zoom.step || 0.1;
+        this.zoomRange = { min: caps.zoom.min, max: Math.min(caps.zoom.max, caps.zoom.min * 8) };
         let current = caps.zoom.min;
         try { current = track.getSettings().zoom || caps.zoom.min; } catch (e) { /* ignore */ }
         // Close up, phone lenses cannot focus (minimum focus distance ~10–20 cm). Starting at ×1.5
@@ -430,11 +467,22 @@
           current = 1.5;
           track.applyConstraints({ advanced: [{ zoom: current }] }).catch(() => {});
         }
-        zoom.value = current;
-        zoomWrap.hidden = false;
+        this.zoom = current;
       } else {
-        zoomWrap.hidden = true;
+        this.zoomRange = null;
+        this.zoom = 1;
       }
+    },
+
+    // Picture enlarged on the screen only (cameras without zoom): the barcode reader still sees the
+    // whole picture; "צלם טקסט" reads what is inside the frame on the screen
+    setDigitalZoom(z) {
+      this.digitalZoom = z;
+      $('video').style.transform = z > 1.001 ? `scale(${z})` : '';
+    },
+
+    zoomLevel() {
+      return this.zoomRange ? (this.zoom || this.zoomRange.min) : (this.digitalZoom || 1);
     },
 
     hasAutofocus(track) {
@@ -607,10 +655,28 @@
       }
     },
 
+    // Zoom to `value` – keeps up with a moving pinch: one change at a time, the newest value wins
     async setZoom(value) {
       if (!this.track) return;
       this.zoomTouched = true;
-      try { await this.track.applyConstraints({ advanced: [{ zoom: Number(value) }] }); } catch (e) { /* ignore */ }
+      if (!this.zoomRange) {
+        this.setDigitalZoom(Math.min(4, Math.max(1, value)));
+        return;
+      }
+      const z = Math.min(this.zoomRange.max, Math.max(this.zoomRange.min, Number(value)));
+      this.zoom = z;
+      this.zoomWanted = z;
+      if (this.zoomBusy) return;
+      this.zoomBusy = true;
+      try {
+        while (this.track && this.zoomApplied !== this.zoomWanted) {
+          const v = this.zoomWanted;
+          try { await this.track.applyConstraints({ advanced: [{ zoom: v }] }); } catch (e) { /* ignore */ }
+          this.zoomApplied = v;
+        }
+      } finally {
+        this.zoomBusy = false;
+      }
     },
 
     async requestWakeLock() {
@@ -1153,12 +1219,12 @@
       e.target.value = '';
       scanPhotos(files);
     });
-    $('zoom').addEventListener('input', (e) => scanner.setZoom(e.target.value));
+    setupPinchZoom();
     $('focus').addEventListener('input', (e) => scanner.setFocusDistance(e.target.value));
     $('btnFocus').addEventListener('click', () => scanner.refocus());
     $('btnSwitchCam').addEventListener('click', () => scanner.switchCamera());
     $('video').addEventListener('click', (e) => {
-      if (!scanner.running) return;
+      if (!scanner.running || performance.now() - lastPinchEnd < 500) return;
       const r = e.currentTarget.getBoundingClientRect();
       scanner.refocus((e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
     });

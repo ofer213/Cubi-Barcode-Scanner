@@ -13,7 +13,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-  <link rel="stylesheet" href="style.css?v=1.5.0">
+  <link rel="stylesheet" href="style.css?v=1.5.1">
 </head>
 <body>
   <div class="app">
@@ -82,12 +82,9 @@
           <span>פוקוס</span>
           <input type="range" id="focus" min="0" max="1" step="0.01" value="0">
         </label>
-        <label class="zoom" id="zoomWrap" hidden>
-          <span>זום</span>
-          <input type="range" id="zoom" min="1" max="1" step="0.1" value="1">
-        </label>
       </div>
       <div class="focus-ring" id="focusRing" aria-hidden="true"></div>
+      <div class="zoom-badge" id="zoomBadge" hidden></div>
       <div class="hint" id="hint" hidden></div>
     </section>
 
@@ -258,10 +255,10 @@
     </form>
   </dialog>
 
-  <script src="vendor/zxing-reader.js?v=1.5.0"></script>
-  <script src="vendor/xlsx.mini.min.js?v=1.5.0"></script>
-  <script src="vendor/mqtt.min.js?v=1.5.0"></script>
-  <script src="remote.js?v=1.5.0"></script>
-  <script src="app.js?v=1.5.0"></script>
+  <script src="vendor/zxing-reader.js?v=1.5.1"></script>
+  <script src="vendor/xlsx.mini.min.js?v=1.5.1"></script>
+  <script src="vendor/mqtt.min.js?v=1.5.1"></script>
+  <script src="remote.js?v=1.5.1"></script>
+  <script src="app.js?v=1.5.1"></script>
 </body>
 </html>

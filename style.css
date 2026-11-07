@@ -259,3 +259,12 @@ button { cursor: pointer; }
 .capture-btn { grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; gap: 8px; }
 .capture-btn:disabled { opacity: .6; }
 .controls:has(#modeToggle[hidden]):has(#textKindToggle[hidden]) { grid-template-columns: 1fr; }
+
+/* two-finger zoom (1.5.1) */
+#camera { touch-action: pan-x pan-y; }
+.camera video { transform-origin: center center; transition: transform .05s linear; }
+.zoom-badge {
+  position: absolute; top: 12px; left: 50%; transform: translateX(-50%); padding: 4px 12px; border-radius: 999px;
+  background: rgba(0, 0, 0, .6); color: #fff; font-weight: 700; font-size: 15px; pointer-events: none; z-index: 3;
+}
+.zoom-badge[hidden] { display: none; }
