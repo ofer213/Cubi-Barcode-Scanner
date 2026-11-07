@@ -5,9 +5,9 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.4.2';
+  const APP_VERSION = '1.5.0';
   const STORE = { settings: 'cubey.settings.v1', list: 'cubey.list.v1', history: 'cubey.history.v1' };
-  const DEFAULTS = { target: 'phone', mode: 'continuous', beep: true, vibrate: true, wake: true, repeat: 1.5, sumQty: false, cameraId: '', ocrLang: 'heb+eng', textReview: true, kind: 'barcode' };
+  const DEFAULTS = { target: 'phone', mode: 'continuous', beep: true, vibrate: true, wake: true, repeat: 1.5, sumQty: false, cameraId: '', ocrLang: 'heb+eng', textReview: true, kind: 'barcode', textKind: 'text', ocrModel: 'best' };
   const HISTORY_MAX = 50;
   const READ_OPTS = {
     formats: [],               // all supported formats
@@ -1076,6 +1076,15 @@
     $('btnCapture').hidden = !(isText && state === 'running');
   }
 
+  // Text mode: ordinary text (Hebrew / English) or a serial number (English letters, digits, - / .)
+  function setTextKind(kind) {
+    settings.textKind = kind === 'serial' ? 'serial' : 'text';
+    saveSettings();
+    $('textKindText').setAttribute('aria-checked', String(settings.textKind === 'text'));
+    $('textKindSerial').setAttribute('aria-checked', String(settings.textKind === 'serial'));
+    preloadOcr();
+  }
+
   // Barcode scanning / text scanning – chosen on the main screen
   function setKind(kind) {
     settings.kind = kind === 'text' ? 'text' : 'barcode';
@@ -1087,6 +1096,8 @@
     $('modeToggle').hidden = isText;
     $('btnPhoto').hidden = isText;
     $('btnText').hidden = !isText;
+    $('textKindToggle').hidden = !isText;
+    preloadOcr();
     setScanButton(scanner.running ? 'running' : 'idle');
     if (!scanner.running) setIdle(isText ? IDLE_TEXT_KIND : IDLE_TEXT[settings.target]);
   }
@@ -1156,6 +1167,8 @@
     $('btnCapture').addEventListener('click', () => { ensureAudio(); readTextFromCamera(); });
     $('kindBarcode').addEventListener('click', () => setKind('barcode'));
     $('kindText').addEventListener('click', () => setKind('text'));
+    $('textKindText').addEventListener('click', () => setTextKind('text'));
+    $('textKindSerial').addEventListener('click', () => setTextKind('serial'));
     const tDlg = $('textDialog');
     $('btnTextSend').addEventListener('click', () => {
       const text = $('textResult').value.trim();
@@ -1225,6 +1238,7 @@
       $('setWake').checked = !!settings.wake;
       $('setRepeat').value = String(settings.repeat);
       $('setOcrLang').value = settings.ocrLang || 'heb+eng';
+      $('setOcrModel').value = settings.ocrModel === 'fast' ? 'fast' : 'best';
       $('setTextReview').checked = settings.textReview !== false;
       if (typeof dialog.showModal === 'function') dialog.showModal();
       else dialog.setAttribute('open', '');
@@ -1233,7 +1247,8 @@
     $('setVibrate').addEventListener('change', (e) => { settings.vibrate = e.target.checked; saveSettings(); });
     $('setWake').addEventListener('change', (e) => { settings.wake = e.target.checked; saveSettings(); });
     $('setRepeat').addEventListener('change', (e) => { settings.repeat = Number(e.target.value); saveSettings(); });
-    $('setOcrLang').addEventListener('change', (e) => { settings.ocrLang = e.target.value; saveSettings(); });
+    $('setOcrLang').addEventListener('change', (e) => { settings.ocrLang = e.target.value; saveSettings(); preloadOcr(); });
+    $('setOcrModel').addEventListener('change', (e) => { settings.ocrModel = e.target.value; saveSettings(); preloadOcr(); });
     $('setTextReview').addEventListener('change', (e) => { settings.textReview = e.target.checked; saveSettings(); });
 
     document.addEventListener('visibilitychange', () => {
@@ -1247,6 +1262,7 @@
     bind();
     setupInstall();
     setMode(settings.mode === 'single' ? 'single' : 'continuous');
+    setTextKind(settings.textKind);
     setKind(settings.kind);
     setTarget(['pc', 'phone', 'list'].includes(settings.target) ? settings.target : 'phone');
     renderHistory();
@@ -1375,9 +1391,15 @@
   // Tesseract (Hebrew + English) runs on the phone itself; the engine (~7 MB) is downloaded on first use
   // and kept by the browser afterwards.
   const OCR_DIR = 'vendor/ocr/';
-  let ocrWorker = null;
-  let ocrWorkerLang = '';
+  // Several engines work side by side (one per pair of processor cores, at most 4; 2 on iPhone,
+  // fewer on phones with little memory). The first one is loaded in advance, as soon as text
+  // mode is chosen; the others are added in the background.
+  let ocrPool = [];
+  let ocrPoolKey = '';
+  let ocrFilling = null;
+  let ocrFirst = null;
   let ocrScript = null;
+  let ocrActive = false;
 
   function loadScript(src) {
     return new Promise((resolve, reject) => {
@@ -1389,25 +1411,100 @@
     });
   }
 
-  async function getOcrWorker(progress) {
-    const lang = settings.ocrLang || 'heb+eng';
-    if (ocrWorker && ocrWorkerLang === lang) return ocrWorker;
-    if (!ocrScript) ocrScript = loadScript(OCR_DIR + 'tesseract.min.js?v=' + APP_VERSION).catch((e) => { ocrScript = null; throw e; });
-    await ocrScript;
-    if (ocrWorker) { try { await ocrWorker.terminate(); } catch (e) { /* ignore */ } ocrWorker = null; }
+  function ocrWantedWorkers() {
+    const cores = navigator.hardwareConcurrency || 2;
+    const mem = navigator.deviceMemory || 4;
+    const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    let n = Math.floor(cores / 2);
+    if (ios) n = Math.min(n, 2); // Safari closes pages that use a lot of memory
+    if (mem <= 2) n = 1;
+    else if (mem <= 4) n = Math.min(n, 2);
+    return Math.max(1, Math.min(4, n));
+  }
+
+  // Serial-number mode: English engine only (no Hebrew guesses); the result keeps only English
+  // letters, digits and - / . (a character list inside the engine was tried: it lowers its
+  // certainty so much that real serial numbers were thrown away)
+  function serialOnly(text) {
+    return text.split('\n')
+      .map((l) => l.replace(/[^A-Za-z0-9\-/. ]/g, '').replace(/\s*-\s*/g, '-').replace(/ {2,}/g, ' ').trim())
+      .filter((l) => /[A-Za-z0-9]{2,}/.test(l))
+      .join('\n');
+  }
+  function ocrConfig() {
+    const serial = settings.textKind === 'serial';
+    const lang = serial ? 'eng' : (settings.ocrLang || 'heb+eng');
+    const model = settings.ocrModel === 'fast' ? 'fast' : 'best';
+    return { lang, model, serial, key: `${lang}|${model}|${serial ? 'serial' : 'text'}` };
+  }
+
+  async function createOcrWorker(cfg) {
     const dir = new URL(OCR_DIR, location.href).href;
-    ocrWorker = await withTimeout(window.Tesseract.createWorker(lang.split('+'), 1 /* LSTM only */, {
+    const w = await withTimeout(window.Tesseract.createWorker(cfg.lang.split('+'), 1 /* LSTM only */, {
       workerPath: dir + 'worker.min.js',
       corePath: dir,
-      langPath: dir.replace(/\/$/, ''),
+      langPath: cfg.model === 'fast' ? dir + 'fast' : dir.replace(/\/$/, ''),
+      // the fast and the accurate language files are kept apart in the browser's storage
+      cachePath: cfg.model === 'fast' ? 'fast' : '.',
       workerBlobURL: false,
       gzip: true,
       logger: (m) => { if (m && typeof m.progress === 'number') ocrProgress(m.status, m.progress); },
       errorHandler: (e) => console.error('OCR worker', e),
     }), 90000, 'טעינת מנוע הטקסט לא הסתיימה תוך 90 שניות');
-    await ocrWorker.setParameters({ preserve_interword_spaces: '1', user_defined_dpi: '300' });
-    ocrWorkerLang = lang;
-    return ocrWorker;
+    await w.setParameters({ preserve_interword_spaces: '1', user_defined_dpi: '300' });
+    return w;
+  }
+
+  async function killOcrPool() {
+    const old = ocrPool;
+    ocrPool = [];
+    ocrPoolKey = '';
+    ocrFirst = null;
+    for (const w of old) { try { await w.terminate(); } catch (e) { /* ignore */ } }
+  }
+
+  // At least one engine ready (waits for it); more are added in the background
+  async function getOcrPool() {
+    const cfg = ocrConfig();
+    if (ocrPoolKey !== cfg.key) {
+      await killOcrPool();
+      ocrPoolKey = cfg.key;
+    }
+    if (!ocrScript) ocrScript = loadScript(OCR_DIR + 'tesseract.min.js?v=' + APP_VERSION).catch((e) => { ocrScript = null; throw e; });
+    await ocrScript;
+    if (!ocrPool.length) {
+      if (!ocrFirst) {
+        ocrFirst = createOcrWorker(cfg).then((w) => {
+          if (ocrPoolKey === cfg.key) ocrPool.push(w); else w.terminate();
+        }).catch((e) => { ocrFirst = null; throw e; });
+      }
+      await ocrFirst;
+    }
+    fillOcrPool(cfg);
+    return ocrPool;
+  }
+
+  function fillOcrPool(cfg) {
+    if (ocrFilling) return;
+    const want = ocrWantedWorkers();
+    ocrFilling = (async () => {
+      while (ocrPool.length < want && ocrPoolKey === cfg.key) {
+        try {
+          const w = await createOcrWorker(cfg);
+          if (ocrPoolKey === cfg.key && ocrPool.length < want) ocrPool.push(w); else { w.terminate(); break; }
+        } catch (e) {
+          console.warn('extra OCR engine not loaded', e); // keep working with the engines there are
+          break;
+        }
+      }
+    })().finally(() => { ocrFilling = null; });
+  }
+
+  // Load the engine in the background (text mode chosen / its settings changed)
+  function preloadOcr() {
+    if (settings.kind !== 'text') return;
+    const run = () => getOcrPool().catch((e) => console.warn('OCR preload', e));
+    if (window.requestIdleCallback) requestIdleCallback(run, { timeout: 1500 }); else setTimeout(run, 300);
   }
 
   // Picture → canvas ready for OCR: gray, large enough (small text needs ~30 px letters),
@@ -1541,13 +1638,6 @@
     ]).finally(() => clearTimeout(timer));
   }
 
-  async function killOcrWorker() {
-    const w = ocrWorker;
-    ocrWorker = null;
-    ocrWorkerLang = '';
-    if (w) { try { await w.terminate(); } catch (e) { /* ignore */ } }
-  }
-
   let ocrStage = '';
   // How much real text a quick pass found: letters in clearly read words
   function textScore(data) {
@@ -1570,39 +1660,111 @@
       const { data } = await withTimeout(worker.recognize(canvas, {}, { blocks: true, text: true }), 60000, 'TIMEOUT');
       return data;
     } catch (e) {
-      // too long (or the engine crashed): restart the engine next time
-      await killOcrWorker();
+      // too long (or the engine crashed): restart the engines next time
+      await killOcrPool();
       throw new Error(e && e.message === 'TIMEOUT'
         ? 'הזיהוי לקח יותר מדי זמן. צלם רק את האזור עם הטקסט, מקרוב.' : (e && e.message) || String(e));
     }
   }
 
-  async function ocrOne(source, W, H) {
-    const worker = await getOcrWorker();
-    // 1. Which way is up: quick reads of a small copy (upright first; the other directions only
-    //    when the upright one has little clear text)
-    const tries = [[0, true], [0, false], [1, true], [1, false], [3, true], [3, false], [2, true], [2, false]];
-    let best = { turn: 0, flat: true, score: -1 };
-    const started = Date.now();
-    for (let i = 0; i < tries.length; i++) {
-      if (i >= 2 && Date.now() - started > 20000) break;
-      const [turn, flat] = tries[i];
-      ocrStage = ` (בדיקה ${i + 1}/${tries.length})`;
-      const data = await recognizeSafe(worker, ocrCanvas(source, W, H, turn, 1200, flat));
-      const score = textScore(data);
-      if (score > best.score) best = { turn, flat, score };
-      // upright already reads well – no need to check the other directions
-      if (i === 1 && best.score >= 25) break;
+  // Runs the pictures on all ready engines at the same time; stop() can skip the remaining ones
+  async function runParallel(canvases, onDone, stop) {
+    const pool = ocrPool.slice();
+    const results = new Array(canvases.length).fill(null);
+    let next = 0;
+    let done = 0;
+    await Promise.all(pool.map(async (w) => {
+      while (next < canvases.length) {
+        if (stop && stop()) return;
+        const i = next++;
+        results[i] = await recognizeSafe(w, canvases[i]);
+        done++;
+        if (onDone) onDone(done, canvases.length);
+      }
+    }));
+    return results;
+  }
+
+  // Cuts the picture into horizontal strips – only where there is empty space between lines of
+  // text, never through a line – one strip per engine
+  function splitStrips(canvas, n) {
+    const W = canvas.width;
+    const H = canvas.height;
+    if (n <= 1 || H < 300) return [canvas];
+    const d = canvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data;
+    const step = Math.max(1, Math.floor(W / 600));
+    const blank = new Uint8Array(H);
+    for (let y = 0; y < H; y++) {
+      let ink = 0;
+      for (let x = 0; x < W; x += step) if (d[(y * W + x) * 4] < 110) ink++;
+      blank[y] = ink <= Math.max(1, (W / step) * 0.002) ? 1 : 0;
     }
-    // nothing that looks like words in any direction – no point in the slow full read
+    const cuts = [0];
+    for (let k = 1; k < n; k++) {
+      const target = Math.round((k * H) / n);
+      const radius = Math.round(H / (2 * n));
+      let found = -1;
+      for (let r = 0; r <= radius && found < 0; r++) {
+        for (const y of [target - r, target + r]) {
+          if (y > 2 && y < H - 3 && blank[y - 2] && blank[y - 1] && blank[y] && blank[y + 1] && blank[y + 2]) { found = y; break; }
+        }
+      }
+      if (found > cuts[cuts.length - 1] + 80 && found < H - 80) cuts.push(found);
+    }
+    cuts.push(H);
+    if (cuts.length <= 2) return [canvas];
+    const strips = [];
+    for (let i = 0; i < cuts.length - 1; i++) {
+      const h = cuts[i + 1] - cuts[i];
+      const c = document.createElement('canvas');
+      c.width = W;
+      c.height = h + 20;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, c.width, c.height);
+      ctx.drawImage(canvas, 0, cuts[i], W, h, 0, 10, W, h);
+      strips.push(c);
+    }
+    return strips;
+  }
+
+  // opts.upright: the picture is known to be the right way up (taken with the app's camera)
+  async function ocrOne(source, W, H, opts = {}) {
+    await getOcrPool();
+    // 1. Which way is up, and with or without evening out the light: quick reads of a small copy,
+    //    side by side on the engines. Other directions only when upright has little clear text.
+    const upright = [[0, true], [0, false]];
+    const others = [[1, true], [1, false], [3, true], [3, false], [2, true], [2, false]];
+    let best = { turn: 0, flat: true, score: -1 };
+    const judge = (tries, datas) => datas.forEach((data, i) => {
+      if (!data) return;
+      const score = textScore(data);
+      if (score > best.score) best = { turn: tries[i][0], flat: tries[i][1], score };
+    });
+    ocrStage = ' (בדיקה)';
+    judge(upright, await runParallel(upright.map(([t, f]) => ocrCanvas(source, W, H, t, 1200, f))));
+    if (!opts.upright && best.score < 25) {
+      const started = Date.now();
+      ocrStage = ' (בודק כיוון)';
+      judge(others, await runParallel(others.map(([t, f]) => ocrCanvas(source, W, H, t, 1200, f)), null,
+        () => Date.now() - started > 20000));
+    }
+    // nothing that looks like words – no point in the slow full read
     if (best.score < 6) { ocrStage = ''; return ''; }
-    // 2. The full read, only in the right direction and the better picture treatment
+    // 2. The full read in the right direction, cut into strips that the engines read together
     ocrStage = '';
-    const data = await recognizeSafe(worker, ocrCanvas(source, W, H, best.turn, 2000, best.flat));
-    const text = cleanOcr(data);
+    const full = ocrCanvas(source, W, H, best.turn, 2000, best.flat);
+    const strips = splitStrips(full, ocrPool.length);
+    const datas = await runParallel(strips, (done, total) => {
+      if (total > 1) ocrBusy(true, `מזהה טקסט… ${done}/${total}`);
+    });
+    const parts = datas.map((data) => cleanOcr(data)).filter(Boolean);
+    let text = parts.join('\n');
+    if (settings.textKind === 'serial') text = serialOnly(text);
+    const conf = datas.reduce((a, d) => a + ((d && d.confidence) || 0), 0) / Math.max(1, datas.length);
     // a single short word read with low certainty is almost always noise
-    const letters = (text.match(/[0-9A-Za-z\u05D0-\u05EA]/g) || []).length;
-    if (letters < 5 && (data.confidence || 0) < 80) return '';
+    const letters = (text.match(/[0-9A-Za-zא-ת]/g) || []).length;
+    if (letters < 5 && conf < 80) return '';
     return text;
   }
 
@@ -1613,8 +1775,10 @@
     $('btnCaptureText').textContent = on ? (label || 'מזהה טקסט…') : 'צלם טקסט';
   }
   const ocrProgress = (status, p) => {
+    if (!ocrActive) return; // loading in advance – no change on the buttons
     if (/load|initializ/i.test(status) && p < 1) ocrBusy(true, 'טוען מנוע טקסט…');
-    else if (/recogniz/i.test(status)) ocrBusy(true, `מזהה טקסט… ${Math.round(p * 100)}%${ocrStage}`);
+    else if (/recogniz/i.test(status) && ocrStage) ocrBusy(true, `מזהה טקסט…${ocrStage}`);
+    else if (/recogniz/i.test(status) && ocrPool.length <= 1) ocrBusy(true, `מזהה טקסט… ${Math.round(p * 100)}%`);
   };
 
   function deliverText(text) {
@@ -1640,6 +1804,7 @@
   async function readTextFromPhotos(files) {
     if (!files || !files.length) return;
     if (scanner.running) scanner.stop();
+    ocrActive = true;
     ocrBusy(true);
     try {
       const texts = [];
@@ -1654,51 +1819,116 @@
       console.error(e);
       toast('זיהוי הטקסט נכשל: ' + String((e && (e.message || e)) || '').slice(0, 120), 7000);
     } finally {
+      ocrActive = false;
       ocrBusy(false);
     }
   }
 
-  // Camera is on: read the text from the current picture (full camera resolution)
-  // A real photo from the camera (full sensor size; most Android phones focus before taking it);
-  // otherwise the current video picture
-  async function grabPhoto() {
-    const track = scanner.track;
-    if (track && window.ImageCapture) {
-      try {
-        const blob = await Promise.race([
-          new ImageCapture(track).takePhoto(),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 6000)),
-        ]);
-        const img = await loadPhoto(blob);
-        if ((img.width || 0) > 0) return img;
-      } catch (e) { /* fall back to the video picture */ }
+  // ---- "צלם טקסט": only the part inside the frame, a sharp moment, the torch when it is dark
+  // The frame drawn on the screen, in video pixels (the video fills the screen box – object-fit: cover)
+  function guideCrop(video) {
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    const full = { x: 0, y: 0, w: vw, h: vh };
+    const guide = document.querySelector('#camera .guide');
+    if (!guide) return full;
+    const el = video.getBoundingClientRect();
+    const g = guide.getBoundingClientRect();
+    if (!el.width || !el.height || !g.width) return full;
+    const s = Math.max(el.width / vw, el.height / vh);
+    const ox = (el.width - vw * s) / 2;
+    const oy = (el.height - vh * s) / 2;
+    let x = (g.left - el.left - ox) / s;
+    let y = (g.top - el.top - oy) / s;
+    let w = g.width / s;
+    let h = g.height / s;
+    x = Math.max(0, x); y = Math.max(0, y);
+    w = Math.min(vw - x, w); h = Math.min(vh - y, h);
+    return w > 60 && h > 60 ? { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) } : full;
+  }
+
+  // Small gray copy of the frame area: brightness, sharpness (edges) and movement since the last one
+  function frameStats(video, crop, prevGray) {
+    const W = 200;
+    const H = Math.max(20, Math.round((W * crop.h) / crop.w));
+    const c = frameStats.canvas || (frameStats.canvas = document.createElement('canvas'));
+    c.width = W;
+    c.height = H;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(video, crop.x, crop.y, crop.w, crop.h, 0, 0, W, H);
+    const d = ctx.getImageData(0, 0, W, H).data;
+    const gray = new Float32Array(W * H);
+    let bright = 0;
+    for (let i = 0; i < W * H; i++) {
+      gray[i] = (d[i * 4] * 299 + d[i * 4 + 1] * 587 + d[i * 4 + 2] * 114) / 1000;
+      bright += gray[i];
     }
-    const video = $('video');
-    const c = document.createElement('canvas');
-    c.width = video.videoWidth;
-    c.height = video.videoHeight;
-    c.getContext('2d').drawImage(video, 0, 0);
-    return c;
+    let sharp = 0;
+    for (let y = 1; y < H - 1; y++) {
+      for (let x = 1; x < W - 1; x++) {
+        const i = y * W + x;
+        sharp += Math.abs(4 * gray[i] - gray[i - 1] - gray[i + 1] - gray[i - W] - gray[i + W]);
+      }
+    }
+    let motion = 0;
+    if (prevGray && prevGray.length === gray.length) {
+      for (let i = 0; i < gray.length; i++) motion += Math.abs(gray[i] - prevGray[i]);
+      motion /= gray.length;
+    } else motion = 99;
+    return { gray, bright: bright / (W * H), sharp: sharp / ((W - 2) * (H - 2)), motion };
+  }
+
+  // Waits (at most 1.5 s) for a moment when the phone is still and the picture is sharp
+  async function waitSharp(video, crop) {
+    const t0 = performance.now();
+    let prev = null;
+    let best = 0;
+    while (performance.now() - t0 < 1500) {
+      const st = frameStats(video, crop, prev);
+      best = Math.max(best, st.sharp);
+      if (performance.now() - t0 > 250 && st.motion < 3 && st.sharp >= best * 0.9) return true;
+      prev = st.gray;
+      await new Promise((r) => setTimeout(r, 80));
+    }
+    return false;
   }
 
   async function readTextFromCamera() {
     const video = $('video');
     if (!scanner.running || !video.videoWidth) return;
-    ocrBusy(true, 'מצלם…');
+    ocrActive = true;
+    ocrBusy(true, 'מחזיק יציב…');
     $('btnCapture').disabled = true;
+    let torchByUs = false;
     try {
-      await scanner.refocus(undefined, undefined, true);
-      await new Promise((r) => setTimeout(r, 400));
-      const pic = await grabPhoto();
+      getOcrPool().catch(() => {}); // make sure the engine is loading meanwhile
+      const crop = guideCrop(video);
+      // dark: the torch for the photo (off again afterwards)
+      const caps = scanner.caps || {};
+      if (caps.torch && !scanner.torchOn && frameStats(video, crop).bright < 70) {
+        try {
+          await scanner.track.applyConstraints({ advanced: [{ torch: true }] });
+          torchByUs = true;
+          await new Promise((r) => setTimeout(r, 450));
+        } catch (e) { /* no torch */ }
+      }
+      scanner.refocus(undefined, undefined, true);
+      await waitSharp(video, crop);
+      const pic = document.createElement('canvas');
+      pic.width = crop.w;
+      pic.height = crop.h;
+      pic.getContext('2d').drawImage(video, crop.x, crop.y, crop.w, crop.h, 0, 0, crop.w, crop.h);
       flash();
       beep();
+      if (torchByUs) { scanner.track.applyConstraints({ advanced: [{ torch: false }] }).catch(() => {}); torchByUs = false; }
       ocrBusy(true);
-      deliverText(await ocrOne(pic, pic.width, pic.height));
-      if (pic.close) pic.close();
+      deliverText(await ocrOne(pic, pic.width, pic.height, { upright: true }));
     } catch (e) {
       console.error(e);
       toast('זיהוי הטקסט נכשל: ' + String((e && (e.message || e)) || '').slice(0, 120), 7000);
     } finally {
+      if (torchByUs && scanner.track) scanner.track.applyConstraints({ advanced: [{ torch: false }] }).catch(() => {});
+      ocrActive = false;
       ocrBusy(false);
       $('btnCapture').disabled = false;
     }

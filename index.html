@@ -13,7 +13,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-  <link rel="stylesheet" href="style.css?v=1.4.2">
+  <link rel="stylesheet" href="style.css?v=1.5.0">
 </head>
 <body>
   <div class="app">
@@ -98,6 +98,10 @@
       <div class="mode-toggle" id="modeToggle" role="radiogroup" aria-label="מצב סריקה">
         <button type="button" role="radio" data-mode="single" id="modeSingle">בודדת</button>
         <button type="button" role="radio" data-mode="continuous" id="modeContinuous">רציפה</button>
+      </div>
+      <div class="mode-toggle text-kind" id="textKindToggle" role="radiogroup" aria-label="סוג טקסט" hidden>
+        <button type="button" role="radio" id="textKindText">טקסט רגיל</button>
+        <button type="button" role="radio" id="textKindSerial">מספר סידורי</button>
       </div>
       <button type="button" class="primary capture-btn" id="btnCapture" hidden>
         <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M4 5h3l2-2h6l2 2h3a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zm8 3.5a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9zm0 2a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z"/></svg>
@@ -203,6 +207,13 @@
           <option value="heb">עברית בלבד</option>
         </select>
       </label>
+      <label class="field-row">
+        <span>מנוע זיהוי טקסט</span>
+        <select id="setOcrModel">
+          <option value="best">מדויק</option>
+          <option value="fast">מהיר</option>
+        </select>
+      </label>
       <label class="switch-row"><span>הצג טקסט מתמונה לפני שליחה</span><input type="checkbox" id="setTextReview"></label>
       <p class="muted small">קוד שנשאר מול המצלמה לא נסרק שוב. כדי לסרוק אותו שוב, מרחיקים אותו מהמצלמה לזמן שנבחר.</p>
       <div class="sheet-actions"><button class="primary" value="close">סגור</button></div>
@@ -247,10 +258,10 @@
     </form>
   </dialog>
 
-  <script src="vendor/zxing-reader.js?v=1.4.2"></script>
-  <script src="vendor/xlsx.mini.min.js?v=1.4.2"></script>
-  <script src="vendor/mqtt.min.js?v=1.4.2"></script>
-  <script src="remote.js?v=1.4.2"></script>
-  <script src="app.js?v=1.4.2"></script>
+  <script src="vendor/zxing-reader.js?v=1.5.0"></script>
+  <script src="vendor/xlsx.mini.min.js?v=1.5.0"></script>
+  <script src="vendor/mqtt.min.js?v=1.5.0"></script>
+  <script src="remote.js?v=1.5.0"></script>
+  <script src="app.js?v=1.5.0"></script>
 </body>
 </html>
